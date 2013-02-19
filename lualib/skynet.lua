@@ -1,5 +1,5 @@
-local c = require "skynet.c"
-local mc = require "mcast.c"
+local c = require "skynet.c"            -- 加.c是为了找到skynet.so, 当然可能误伤skynet/c.lua
+local mc = require "mcast.c"            -- 加载mcast.so, 可能误伤mcast/c.lua
 local tostring = tostring
 local tonumber = tonumber
 local coroutine = coroutine

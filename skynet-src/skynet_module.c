@@ -40,7 +40,7 @@ _try_open(struct modules *m, const char * name) {
 	}
 
 	void * dl = dlopen(tmp, RTLD_NOW | RTLD_GLOBAL);
-k
+
 	if (dl == NULL) {
 		fprintf(stderr, "try open %s failed : %s\n",tmp,dlerror());
 	}
