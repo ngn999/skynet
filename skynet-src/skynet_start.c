@@ -58,7 +58,7 @@ _worker(void *p) {
 	struct skynet_monitor *sm = p;
 	for (;;) {
 		if (skynet_context_message_dispatch(sm)) {
-			CHECK_ABORT
+			CHECK_ABORT;
 			usleep(1000);
 		} 
 	}
@@ -91,7 +91,8 @@ _start(int thread) {
 
 static int
 _start_master(const char * master) {
-	struct skynet_context *ctx = skynet_context_new("master", master);
+	struct skynet_context *ctx = skynet_context_new("master", master); /* config :
+                                                                        * standalone = "0.0.0.0:2013" */
 	if (ctx == NULL)
 		return 1;
 	return 0;	
@@ -128,9 +129,9 @@ skynet_start(struct skynet_config * config) {
 		fprintf(stderr,"launch local cast error");
 		exit(1);
 	}
-	ctx = skynet_context_new("snlua", "launcher");
+	ctx = skynet_context_new("snlua", "launcher");          /* load service/launcher.lua */
 	if (ctx) {
-		ctx = skynet_context_new("snlua", config->start);
+		ctx = skynet_context_new("snlua", config->start);   /* load service/main.lua */
 	}
 
 	_start(config->thread);

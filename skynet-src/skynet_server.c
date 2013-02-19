@@ -79,12 +79,14 @@ _id_to_hex(char * str, uint32_t id) {
 
 struct skynet_context * 
 skynet_context_new(const char * name, const char *param) {
-	struct skynet_module * mod = skynet_module_query(name);
+	struct skynet_module * mod = skynet_module_query(name); /* lazy加载 */
 
-	if (mod == NULL)
+	if (mod == NULL)                                        /* not found */
 		return NULL;
 
-	void *inst = skynet_module_instance_create(mod);
+    /* mode的create函数，会创建一些该模块要用到的数据;
+     * 每个实例得有自己的数据 */
+	void *inst = skynet_module_instance_create(mod);        /* m->create() */
 	if (inst == NULL)
 		return NULL;
 	struct skynet_context * ctx = malloc(sizeof(*ctx));
@@ -106,7 +108,7 @@ skynet_context_new(const char * name, const char *param) {
 	_context_inc();
 
 	CHECKCALLING_BEGIN(ctx)
-	int r = skynet_module_instance_init(mod, inst, ctx, param);
+	int r = skynet_module_instance_init(mod, inst, ctx, param); /* mod->init() */
 	CHECKCALLING_END(ctx)
 	if (r == 0) {
 		struct skynet_context * ret = skynet_context_release(ctx);
@@ -233,19 +235,20 @@ _mc(void *ud, uint32_t source, const void * msg, size_t sz) {
 static void
 _dispatch_message(struct skynet_context *ctx, struct skynet_message *msg) {
 	assert(ctx->init);
-	CHECKCALLING_BEGIN(ctx)
-	int type = msg->sz >> HANDLE_REMOTE_SHIFT;
-	size_t sz = msg->sz & HANDLE_MASK;
-	if (type == PTYPE_MULTICAST) {
+	CHECKCALLING_BEGIN(ctx);
+    /* 高8位是type， 低24位是sz(size) */
+	int type = msg->sz >> HANDLE_REMOTE_SHIFT;              /* 24 */
+	size_t sz = msg->sz & HANDLE_MASK;                      /* 0xffffff */
+	if (type == PTYPE_MULTICAST) { /* PTYPE_MULTICAST = 2 */
 		skynet_multicast_dispatch((struct skynet_multicast_message *)msg->data, ctx, _mc);
 	} else {
 		int reserve = ctx->cb(ctx, ctx->cb_ud, type, msg->session, msg->source, msg->data, sz);
-		reserve |= _forwarding(ctx, msg);
+		reserve |= _forwarding(ctx, msg);                   /* 转发？ */
 		if (!reserve) {
 			free(msg->data);
 		}
 	}
-	CHECKCALLING_END(ctx)
+	CHECKCALLING_END(ctx);
 }
 
 int
@@ -277,6 +280,7 @@ skynet_context_message_dispatch(struct skynet_monitor *sm) {
 		free(msg.data);
 		skynet_error(NULL, "Drop message from %x to %x without callback , size = %d",msg.source, handle, (int)msg.sz);
 	} else {
+        /* 根据`msg'的type来决定是call ctx->cb，还是做fwd */
 		_dispatch_message(ctx, &msg);
 	}
 

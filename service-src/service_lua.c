@@ -62,7 +62,7 @@ _try_load(lua_State *L, const char * path, int pathlen, const char * name) {
 		return 1;
 	}
 }
-
+/* 可能会修改filename */
 static int
 _load(lua_State *L, char ** filename) {
 	const char * name = strsep(filename, " \r\n");

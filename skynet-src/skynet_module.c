@@ -18,6 +18,7 @@ struct modules {
 
 static struct modules * M = NULL;
 
+/* in config file: cpath = root.."service/?.so"  */
 static void *
 _try_open(struct modules *m, const char * name) {
 	const char * path = m->path;
@@ -39,7 +40,7 @@ _try_open(struct modules *m, const char * name) {
 	}
 
 	void * dl = dlopen(tmp, RTLD_NOW | RTLD_GLOBAL);
-
+k
 	if (dl == NULL) {
 		fprintf(stderr, "try open %s failed : %s\n",tmp,dlerror());
 	}
@@ -70,7 +71,7 @@ _open_sym(struct skynet_module *mod) {
 	strcpy(tmp+name_size, "_release");
 	mod->release = dlsym(mod->module, tmp);
 
-	return mod->init == NULL;
+	return mod->init == NULL; /* open success or failed */
 }
 
 struct skynet_module * 
@@ -83,7 +84,7 @@ skynet_module_query(const char * name) {
 
 	result = _query(name); // double check
 
-	if (result == NULL && M->count < MAX_MODULE_TYPE) {
+	if (result == NULL && M->count < MAX_MODULE_TYPE) {     /* < 32 */
 		int index = M->count;
 		void * dl = _try_open(M,name);
 		if (dl) {
