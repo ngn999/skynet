@@ -551,9 +551,9 @@ function skynet.start(start_func)
 	c.callback(dispatch_message)
 	trace_handle = assert(c.stat "trace")
 	skynet.timeout(0, function()
-		init_template(start_func)
-		skynet.send(".launcher","text", "")
-	end)
+                         init_template(start_func)
+                         skynet.send(".launcher","text", "")
+                      end)
 end
 
 function skynet.filter(f ,start_func)

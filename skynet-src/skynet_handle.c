@@ -21,8 +21,8 @@ struct handle_storage {
 	int slot_size;
 	struct skynet_context ** slot;
 	
-	int name_cap;
-	int name_count;
+	int name_cap;                       /* 容量 */
+	int name_count;                     /* 已放handle_name的数量 */
 	struct handle_name *name;
 };
 
@@ -226,7 +226,7 @@ void
 skynet_handle_init(int harbor) {
 	assert(H==NULL);
 	struct handle_storage * s = malloc(sizeof(*H));
-	s->slot_size = DEFAULT_SLOT_SIZE;
+	s->slot_size = DEFAULT_SLOT_SIZE;   /* 4 */
 	s->slot = malloc(s->slot_size * sizeof(struct skynet_context *));
 	memset(s->slot, 0, s->slot_size * sizeof(struct skynet_context *));
 

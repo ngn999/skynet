@@ -38,8 +38,8 @@ local function log(name, modname, level, timestamp, msg, src, tags)
 end
 
 skynet.start(function()
-	skynet.dispatch("lua",function(session, from, ...)
-		log(...)
-	end)
-	skynet.register ".lualog"
-end)
+                skynet.dispatch("lua",function(session, from, ...)
+                                         log(...)
+                                      end)
+                skynet.register ".lualog"
+             end)

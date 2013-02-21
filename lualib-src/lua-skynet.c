@@ -500,7 +500,7 @@ luaopen_skynet_c(lua_State *L) {
 	lua_setfield(L, -2, "reload");
 
 	lua_pushlightuserdata(L, lua->ctx);
-	luaL_setfuncs(L,l,1);
+	luaL_setfuncs(L,l,1);               /* lua5.1用luaL_register(),5.2建议用luaL_setfuncs() */
 
 	luaL_setfuncs(L,l2,0);
 

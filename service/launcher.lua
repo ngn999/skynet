@@ -1,4 +1,4 @@
-local skynet = require "skynet"
+local skynet = require "skynet"         -- load lualib/skynet.lua
 local string = string
 
 local services = {}
