@@ -131,7 +131,8 @@ skynet_start(struct skynet_config * config) {
 	}
 	ctx = skynet_context_new("snlua", "launcher");          /* load service/launcher.lua */
 	if (ctx) {
-		ctx = skynet_context_new("snlua", config->start);   /* load service/main.lua */
+		skynet_command(ctx, "REG", ".launcher");
+		ctx = skynet_context_new("snlua", config->start);
 	}
 
 	_start(config->thread);

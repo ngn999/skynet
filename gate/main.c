@@ -1,6 +1,7 @@
 #include "skynet.h"
 #include "mread.h"
 
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -39,7 +40,11 @@ gate_create(void) {
 
 static inline struct connection * 
 _id_to_agent(struct gate *g,int uid) {
-	return g->agent[uid & (g->cap - 1)];
+	struct connection * agent = g->agent[uid & (g->cap - 1)];
+	if (agent && agent->uid == uid) {
+		return agent;
+	}
+	return NULL;
 }
 
 static void
@@ -187,13 +192,30 @@ _cb(struct skynet_context * ctx, void * ud, int type, int session, uint32_t sour
 	if (type == PTYPE_TEXT) {
 		_ctrl(ctx, g , msg , (int)sz);
 		return 0;
+	} else if (type == PTYPE_CLIENT) {
+		if (sz <=4 ) {
+			skynet_error(ctx, "Invalid client message from %x",source);
+			return 0;
+		}
+		struct mread_pool * m = g->pool;
+		// The first 4 bytes in msg are the id of socket, write following bytes to it
+		const uint8_t * data = msg;
+		uint32_t uid = data[0] | data[1] << 8 | data[2] << 16 | data[3] << 24;
+		struct connection * agent = _id_to_agent(g,uid);
+		if (agent) {
+			int id = agent->connection_id;
+			mread_push(m, id, (void *)(data+4), sz - 4, (void *)data);
+			return 1;
+		} else {
+			skynet_error(ctx, "Invalid client id %d from %x",(int)uid,source);
+			return 0;
+		}
 	}
+
 	assert(type == PTYPE_RESPONSE);
 	struct mread_pool * m = g->pool;
 	int connection_id = mread_poll(m,100);	// timeout : 100ms
-	if (connection_id < 0) {
-		skynet_command(ctx, "TIMEOUT", "1");
-	} else {
+	if (connection_id >= 0) {
 		int id = g->map[connection_id].uid;
 		if (id == 0) {
 			id = _gen_id(g, connection_id);
@@ -230,9 +252,9 @@ _cb(struct skynet_context * ctx, void * ud, int type, int session, uint32_t sour
 
 		_forward(ctx, g, id, data, len);
 		mread_yield(m);
-_break:
-		skynet_command(ctx, "TIMEOUT", "0");
 	}
+_break:
+	skynet_command(ctx, "TIMEOUT", "0");
 	return 0;
 }
 

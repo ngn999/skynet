@@ -1,27 +1,8 @@
 #include "mread.h"
 #include "ringbuffer.h"
+#include "event.h"
 
-/* Test for polling API */
-#ifdef __linux__
-#define HAVE_EPOLL 1
-#endif
-
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined (__NetBSD__)
-#define HAVE_KQUEUE 1
-#endif
-
-#if !defined(HAVE_EPOLL) && !defined(HAVE_KQUEUE)
-#error "system does not support epoll or kqueue API"
-#endif
-/* ! Test for polling API */
-
-#ifdef HAVE_EPOLL
-#include <sys/epoll.h>
-#elif HAVE_KQUEUE
-#include <sys/event.h>
-#endif
-
-#include <sys/types.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -34,7 +15,6 @@
 #include <fcntl.h>
 
 #define BACKLOG 32
-#define READQUEUE 32
 #define READBLOCKSIZE 2048
 #define RINGBUFFER_DEFAULT 1024 * 1024
 
@@ -43,25 +23,36 @@
 #define SOCKET_SUSPEND 2
 #define SOCKET_READ 3
 #define SOCKET_POLLIN 4
+#define SOCKET_HALFCLOSE 5
 
 #define SOCKET_ALIVE	SOCKET_SUSPEND
 
 #define LISTENSOCKET (void *)((intptr_t)~0)
 
+struct send_buffer {
+	struct send_buffer * next;
+	int size;
+	char * buff;
+	char * ptr;
+};
+
+struct send_client {
+	struct send_buffer * head;
+	struct send_buffer * tail;
+};
+
 struct socket {
 	int fd;
 	struct ringbuffer_block * node;
 	struct ringbuffer_block * temp;
+	struct send_client client;
+	int enablewrite;
 	int status;
 };
 
 struct mread_pool {
 	int listen_fd;
-#ifdef HAVE_EPOLL
-	int epoll_fd;
-#elif HAVE_KQUEUE
-	int kqueue_fd;
-#endif
+	int efd;
 	int max_connection;
 	int closed;
 	int active;
@@ -70,13 +61,124 @@ struct mread_pool {
 	struct socket * free_socket;
 	int queue_len;
 	int queue_head;
-#ifdef HAVE_EPOLL
-	struct epoll_event ev[READQUEUE];
-#elif HAVE_KQUEUE
-	struct kevent ev[READQUEUE];
-#endif
+	struct event ev[MAX_EVENT];
 	struct ringbuffer * rb;
 };
+
+// send begin
+
+static void 
+turn_on(struct mread_pool *self, struct socket * s) {
+	if (s->status < SOCKET_ALIVE || s->enablewrite) {
+		return;
+	}
+	event_write(self->efd, s->fd, s, true);
+	s->enablewrite = 1;
+}
+
+static void
+turn_off(struct mread_pool *self, struct socket * s) {
+	if (s->status < SOCKET_ALIVE || ! s->enablewrite) {
+		return;
+	}
+	s->enablewrite = 0;
+	event_write(self->efd, s->fd, s, false);
+}
+
+static void
+free_buffer(struct send_client * sc) {
+	struct send_buffer * sb = sc->head;
+	while (sb) {
+		struct send_buffer * tmp = sb;
+		sb = sb->next;
+		free(tmp->ptr);
+		free(tmp);
+	}
+	sc->head = sc->tail = NULL;
+}
+
+static void
+client_send(struct send_client *c, int fd) {
+	while (c->head) {
+		struct send_buffer * tmp = c->head;
+		for (;;) {
+			int sz = write(fd, tmp->buff, tmp->size);
+			if (sz < 0) {
+				switch(errno) {
+				case EINTR:
+					continue;
+				case EAGAIN:
+					return;
+				}
+				free_buffer(c);
+				return;
+			}
+			if (sz != tmp->size) {
+				assert(sz < tmp->size);
+				tmp->buff += sz;
+				tmp->size -= sz;
+				return;
+			}
+			break;
+		}
+		c->head = tmp->next;
+		free(tmp->ptr);
+		free(tmp);
+	}
+	c->tail = NULL;
+}
+
+static void
+client_push(struct send_client *c, void * buf, int sz, void * ptr) {
+	struct send_buffer * sb = malloc(sizeof(*sb));
+	sb->next = NULL;
+	sb->buff = buf;
+	sb->size = sz;
+	sb->ptr = ptr;
+	if (c->head) {
+		c->tail->next = sb;
+		c->tail = sb;
+	} else {
+		c->head = c->tail = sb;
+	}
+}
+
+void 
+mread_push(struct mread_pool *self, int id, void * buffer, int size, void * ptr) {
+	struct socket * s = &self->sockets[id];
+	switch(s->status) {
+	case SOCKET_INVALID:
+	case SOCKET_CLOSED:
+	case SOCKET_HALFCLOSE:
+		free(ptr);
+		return;
+	}
+	if (s->client.head == NULL) {
+		for (;;) {
+			int sz = write(s->fd, buffer, size);
+			if (sz < 0) {
+				switch(errno) {
+				case EINTR:
+					continue;
+				}
+				break;
+			}
+			if (sz == size) {
+				// ptr is malloc by 
+				//  service-src/service-client.c : 18
+				//  uint8_t *tmp = malloc(sz + 4 + 2);
+				free(ptr);
+				return;
+			}
+			buffer = (char *)buffer + sz;
+			size -= sz;
+		}
+	} 
+	client_push(&s->client,buffer, size, ptr);
+	turn_on(self, s);
+}
+
+// send end
 
 static struct socket *
 _create_sockets(int max) {
@@ -87,6 +189,8 @@ _create_sockets(int max) {
 		s[i].node = NULL;
 		s[i].temp = NULL;
 		s[i].status = SOCKET_INVALID;
+		s[i].enablewrite = 0;
+		s[i].client.head = s[i].client.tail = NULL;
 	}
 	s[max-1].fd = -1;
 	return s;
@@ -147,46 +251,22 @@ mread_create(uint32_t addr, int port , int max , int buffer_size) {
 		return NULL;
 	}
 
-#ifdef HAVE_EPOLL
-	int epoll_fd = epoll_create(max + 1);
-	if (epoll_fd == -1) {
+	int efd = event_init(max+1);
+	if (efd == -1) {
 		close(listen_fd);
 		return NULL;
 	}
 
-	struct epoll_event ev;
-	ev.events = EPOLLIN;
-	ev.data.ptr = LISTENSOCKET;
-
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev) == -1) {
+	if (event_add(efd, listen_fd, LISTENSOCKET) == -1) {
 		close(listen_fd);
-		close(epoll_fd);
+		close(efd);
 		return NULL;
 	}
-#elif HAVE_KQUEUE
-	int kqueue_fd = kqueue();
-	if (kqueue_fd == -1) {
-		close(listen_fd);
-		return NULL;
-	}
-
-	struct kevent ke;
-	EV_SET(&ke, listen_fd, EVFILT_READ, EV_ADD, 0, 0, LISTENSOCKET);
-	if (kevent(kqueue_fd, &ke, 1, NULL, 0, NULL) == -1) {
-		close(listen_fd);
-		close(kqueue_fd);
-		return NULL;
-	}
-#endif
 
 	struct mread_pool * self = malloc(sizeof(*self));
 
 	self->listen_fd = listen_fd;
-#ifdef HAVE_EPOLL
-	self->epoll_fd = epoll_fd;
-#elif HAVE_KQUEUE
-	self->kqueue_fd = kqueue_fd;
-#endif
+	self->efd = efd;
 	self->max_connection = max;
 	self->closed = 0;
 	self->active = -1;
@@ -215,30 +295,30 @@ mread_close(struct mread_pool *self) {
 			close(s[i].fd);
 		}
 	}
+
+	free_buffer(&s->client);
 	free(s);
-	if (self->listen_fd >= 0) {
-		close(self->listen_fd);
-	}
-#ifdef HAVE_EPOLL
-	close(self->epoll_fd);
-#elif HAVE_KQUEUE
-	close(self->kqueue_fd);
-#endif
+	mread_close_listen(self);
+	close(self->efd);
 	_release_rb(self->rb);
 	free(self);
+}
+
+void
+mread_close_listen(struct mread_pool *self) {
+	if (self == NULL)
+		return;
+
+	if (self->listen_fd >= 0) {
+		close(self->listen_fd);
+		self->listen_fd = 0;
+	}
 }
 
 static int
 _read_queue(struct mread_pool * self, int timeout) {
 	self->queue_head = 0;
-#ifdef HAVE_EPOLL
-	int n = epoll_wait(self->epoll_fd , self->ev, READQUEUE, timeout);
-#elif HAVE_KQUEUE
-	struct timespec timeoutspec;
-	timeoutspec.tv_sec = timeout / 1000;
-	timeoutspec.tv_nsec = (timeout % 1000) * 1000000;
-	int n = kevent(self->kqueue_fd, NULL, 0, self->ev, READQUEUE, &timeoutspec);
-#endif
+	int n = event_wait(self->efd, self->ev, timeout);
 	if (n == -1) {
 		self->queue_len = 0;
 		return -1;
@@ -247,16 +327,46 @@ _read_queue(struct mread_pool * self, int timeout) {
 	return n;
 }
 
+static void
+try_close(struct mread_pool * self, struct socket * s) {
+	if (s->client.head == NULL) {
+		turn_off(self, s);
+	}
+	if (s->status != SOCKET_HALFCLOSE) {
+		return;
+	}
+	if (s->client.head == NULL) {
+		s->status = SOCKET_CLOSED;
+		s->node = NULL;
+		s->temp = NULL;
+		event_del(self->efd, s->fd);
+		close(s->fd);
+//		printf("MREAD close %d (fd=%d)\n",id,s->fd);
+		++self->closed;
+	}
+}
+
 inline static struct socket *
 _read_one(struct mread_pool * self) {
-	if (self->queue_head >= self->queue_len) {
-		return NULL;
+	for (;;) {
+		if (self->queue_head >= self->queue_len) {
+			return NULL;
+		}
+		struct socket * ret = self->ev[self->queue_head].s;
+		bool writeflag = self->ev[self->queue_head].write;
+		bool readflag = self->ev[self->queue_head].read;
+		++ self->queue_head;
+		if (ret == LISTENSOCKET) {
+			return ret;
+		}
+		if (writeflag && ret->status != SOCKET_CLOSED) {
+			client_send(&ret->client, ret->fd);
+			try_close(self, ret);
+		}
+		if (readflag && ret->status != SOCKET_HALFCLOSE &&
+			ret->status != SOCKET_CLOSED)
+			return ret;
 	}
-#ifdef HAVE_EPOLL
-	return self->ev[self->queue_head ++].data.ptr;
-#elif HAVE_KQUEUE
-	return self->ev[self->queue_head ++].udata;
-#endif
 }
 
 static struct socket *
@@ -281,26 +391,14 @@ _add_client(struct mread_pool * self, int fd) {
 		close(fd);
 		return NULL;
 	}
-#ifdef HAVE_EPOLL
-	struct epoll_event ev;
-	ev.events = EPOLLIN;
-	ev.data.ptr = s;
-	if (epoll_ctl(self->epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+	if (event_add(self->efd, fd, s)) {
 		close(fd);
 		return NULL;
 	}
-#elif HAVE_KQUEUE
-	struct kevent ke;
-	EV_SET(&ke, fd, EVFILT_READ, EV_ADD, 0, 0, s);
-	if (kevent(self->kqueue_fd, &ke, 1, NULL, 0, NULL) == -1) {
-		close(fd);
-		return NULL;
-	}
-#endif
-
 	s->fd = fd;
 	s->node = NULL;
 	s->status = SOCKET_SUSPEND;
+	s->enablewrite = 0;
 
 	return s;
 }
@@ -327,10 +425,10 @@ mread_poll(struct mread_pool * self , int timeout) {
 			return self->active;
 		}
 	}
-	if (self->closed > 0 ) {
-		return _report_closed(self);
-	}
 	if (self->queue_head >= self->queue_len) {
+		if (self->closed > 0 ) {
+			return _report_closed(self);
+		}
 		if (_read_queue(self, timeout) == -1) {
 			self->active = -1;
 			return -1;
@@ -347,6 +445,7 @@ mread_poll(struct mread_pool * self , int timeout) {
 			socklen_t len = sizeof(struct sockaddr_in);
 			int client_fd = accept(self->listen_fd , (struct sockaddr *)&remote_addr ,  &len);
 			if (client_fd >= 0) {
+				_set_nonblocking(client_fd);
 //				printf("MREAD connect %s:%u (fd=%d)\n",inet_ntoa(remote_addr.sin_addr),ntohs(remote_addr.sin_port), client_fd);
 				struct socket * s = _add_client(self, client_fd);
 				if (s) {
@@ -382,21 +481,20 @@ _link_node(struct ringbuffer * rb, int id, struct socket * s , struct ringbuffer
 void
 mread_close_client(struct mread_pool * self, int id) {
 	struct socket * s = &self->sockets[id];
-	s->status = SOCKET_CLOSED;
-	s->node = NULL;
-	s->temp = NULL;
-	close(s->fd);
-//	printf("MREAD close %d (fd=%d)\n",id,s->fd);
+	if (s->status >= SOCKET_ALIVE && s->status != SOCKET_HALFCLOSE) {
+		s->status = SOCKET_HALFCLOSE;
+		try_close(self, s);
+	}
+}
 
-#ifdef HAVE_EPOLL
-	epoll_ctl(self->epoll_fd, EPOLL_CTL_DEL, s->fd , NULL);
-#elif HAVE_KQUEUE
-	struct kevent ke;
-	EV_SET(&ke, s->fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-	kevent(self->kqueue_fd, &ke, 1, NULL, 0, NULL);
-#endif
-
-	++self->closed;
+static void
+force_close_client(struct mread_pool * self, int id) {
+	struct socket * s = &self->sockets[id];
+	free_buffer(&s->client);
+	if (s->status >= SOCKET_ALIVE && s->status != SOCKET_HALFCLOSE) {
+		s->status = SOCKET_HALFCLOSE;
+		try_close(self, s);
+	}
 }
 
 static void
@@ -405,7 +503,7 @@ _close_active(struct mread_pool * self) {
 	struct socket * s = &self->sockets[id];
 	ringbuffer_free(self->rb, s->temp);
 	ringbuffer_free(self->rb, s->node);
-	mread_close_client(self, id);
+	force_close_client(self, id);
 }
 
 static char *
@@ -419,6 +517,19 @@ _ringbuffer_read(struct mread_pool * self, int *size) {
 	void * ret;
 	*size = ringbuffer_data(self->rb, s->node, sz , self->skip, &ret);
 	return ret;
+}
+
+static void
+skip_all(struct socket *s) {
+	char tmp[1024];
+	for (;;) {
+		int bytes = read(s->fd, tmp, sizeof(tmp));
+		if (bytes == 0) {
+			free_buffer(&s->client);
+		} else if (bytes != sizeof(tmp)) {
+			return;
+		}
+	}
 }
 
 void *
@@ -439,6 +550,9 @@ mread_pull(struct mread_pool * self , int size) {
 	case SOCKET_CLOSED:
 	case SOCKET_SUSPEND:
 		return NULL;
+	case SOCKET_HALFCLOSE:
+		skip_all(s);
+		return NULL;
 	default:
 		assert(s->status == SOCKET_POLLIN);
 		break;
@@ -456,7 +570,7 @@ mread_pull(struct mread_pool * self , int size) {
 	struct ringbuffer_block * blk = ringbuffer_alloc(rb , rd);
 	while (blk == NULL) {
 		int collect_id = ringbuffer_collect(rb);
-		mread_close_client(self , collect_id);
+		force_close_client(self , collect_id);
 		if (id == collect_id) {
 			return NULL;
 		}
@@ -466,7 +580,7 @@ mread_pull(struct mread_pool * self , int size) {
 	buffer = (char *)(blk + 1);
 
 	for (;;) {
-		int bytes = recv(s->fd, buffer, rd, MSG_DONTWAIT);
+		int bytes = read(s->fd, buffer, rd);
 		if (bytes > 0) {
 			ringbuffer_shrink(rb, blk , bytes);
 			if (bytes < sz) {
@@ -508,7 +622,7 @@ mread_pull(struct mread_pool * self , int size) {
 	struct ringbuffer_block * temp = ringbuffer_alloc(rb, size);
 	while (temp == NULL) {
 		int collect_id = ringbuffer_collect(rb);
-		mread_close_client(self , collect_id);
+		force_close_client(self , collect_id);
 		if (id == collect_id) {
 			return NULL;
 		}
@@ -537,7 +651,11 @@ mread_yield(struct mread_pool * self) {
 	if (s->status == SOCKET_CLOSED && s->node == NULL) {
 		--self->closed;
 		s->status = SOCKET_INVALID;
-		s->fd = self->free_socket - self->sockets;
+		if (self->free_socket) {
+			s->fd = self->free_socket - self->sockets;
+		} else {
+			s->fd = -1;
+		}
 		self->free_socket = s;
 		self->skip = 0;
 		self->active = -1;
