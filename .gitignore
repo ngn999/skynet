@@ -1,1 +1,16 @@
-*.so
+*.so
+client
+client.dSYM
+luaclib
+service/client.so.dSYM
+service/gate.so.dSYM
+service/harbor.so.dSYM
+service/localcast.so.dSYM
+service/logger.so.dSYM
+service/master.so.dSYM
+service/multicast.so.dSYM
+service/snlua.so.dSYM
+service/socket.so.dSYM
+service/tunnel.so.dSYM
+skynet
+skynet.dSYM
