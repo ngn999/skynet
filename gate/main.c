@@ -120,6 +120,10 @@ _ctrl(struct skynet_context * ctx, struct gate * g, const void * msg, int sz) {
 		skynet_command(ctx,"TIMEOUT","0");
 		return;
 	}
+    if (memcmp(command, "close", i) == 0) {
+        mread_close_listen(g->pool);
+        return;
+    }
 	skynet_error(ctx, "[gate] Unkown command : %s", command);
 }
 
@@ -214,7 +218,7 @@ _cb(struct skynet_context * ctx, void * ud, int type, int session, uint32_t sour
 
 	assert(type == PTYPE_RESPONSE);
 	struct mread_pool * m = g->pool;
-	int connection_id = mread_poll(m,100);	// timeout : 100ms
+	int connection_id = mread_poll(m,10);	// timeout : 10 ms
 	if (connection_id >= 0) {
 		int id = g->map[connection_id].uid;
 		if (id == 0) {

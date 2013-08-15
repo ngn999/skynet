@@ -28,6 +28,29 @@ local sleep_session = {}
 local trace_handle
 local trace_func = function() end
 
+-- coroutine reuse
+
+local coroutine_poll = {}
+local coroutine_yield = coroutine.yield
+
+local function co_create(f)
+	local co = table.remove(coroutine_poll)
+	if co == nil then
+		co = coroutine.create(function(...)
+			f(...)
+			while true do
+				f = nil
+				coroutine_poll[#coroutine_poll] = co
+				f = coroutine_yield "EXIT"
+				f(coroutine_yield())
+			end
+		end)
+	else
+		coroutine.resume(co, f)
+	end
+	return co
+end
+
 -- suspend is function
 local suspend
 
@@ -74,7 +97,7 @@ function suspend(co, result, command, param, size)
 		end
 		c.send(co_address, 1, co_session, param, size)
 		return suspend(co, coroutine.resume(co))
-	elseif command == nil then
+	elseif command == "EXIT" then
 		-- coroutine exit
 		session_coroutine_id[co] = nil
 		session_coroutine_address[co] = nil
@@ -90,7 +113,7 @@ function skynet.timeout(ti, func)
 	local session = c.command("TIMEOUT",tostring(ti))
 	assert(session)
 	session = tonumber(session)
-	local co = coroutine.create(func)
+	local co = co_create(func)
 	assert(session_id_coroutine[session] == nil)
 	session_id_coroutine[session] = co
 end
@@ -99,7 +122,7 @@ function skynet.sleep(ti)
 	local session = c.command("TIMEOUT",tostring(ti))
 	assert(session)
 	session = tonumber(session)
-	local ret = coroutine.yield("SLEEP", session)
+	local ret = coroutine_yield("SLEEP", session)
 	sleep_session[coroutine.running()] = nil
 	if ret == true then
 		c.trace_switch(trace_handle, session)
@@ -110,8 +133,16 @@ end
 function skynet.yield()
 	local session = c.command("TIMEOUT","0")
 	assert(session)
-	coroutine.yield("SLEEP", tonumber(session))
+	coroutine_yield("SLEEP", tonumber(session))
 	sleep_session[coroutine.running()] = nil
+end
+
+function skynet.wait()
+	local session = c.genid()
+	coroutine_yield("SLEEP", session)
+	local co = coroutine.running()
+	sleep_session[co] = nil
+	session_id_coroutine[session] = nil
 end
 
 function skynet.register(name)
@@ -133,6 +164,10 @@ function skynet.self()
 	end
 	self_handle = string_to_handle(c.command("REG"))
 	return self_handle
+end
+
+function skynet.localname(name)
+	return string_to_handle(c.command("QUERY", name))
 end
 
 function skynet.launch(...)
@@ -197,25 +232,25 @@ skynet.tostring = assert(c.tostring)
 function skynet.call(addr, typename, ...)
 	local p = proto[typename]
 	local session = c.send(addr, p.id , nil , p.pack(...))
-	return p.unpack(coroutine.yield("CALL", session))
+	return p.unpack(coroutine_yield("CALL", session))
 end
 
 function skynet.blockcall(addr, typename , ...)
 	local p = proto[typename]
 	c.command("LOCK")
 	local session = c.send(addr, p.id , nil , p.pack(...))
-	return p.unpack(coroutine.yield("CALL", session))
+	return p.unpack(coroutine_yield("CALL", session))
 end
 
 function skynet.rawcall(addr, typename, msg, sz)
 	local p = proto[typename]
 	local session = c.send(addr, p.id , nil , msg, sz)
-	return coroutine.yield("CALL", session)
+	return coroutine_yield("CALL", session)
 end
 
 function skynet.ret(msg, sz)
 	msg = msg or ""
-	coroutine.yield("RETURN", msg, sz)
+	coroutine_yield("RETURN", msg, sz)
 end
 
 function skynet.wakeup(co)
@@ -246,7 +281,7 @@ local fork_queue = {}
 
 function skynet.fork(func,...)
 	local args = { ... }
-	local co = coroutine.create(function()
+	local co = co_create(function()
 		func(unpack(args))
 	end)
 	table.insert(fork_queue, co)
@@ -270,7 +305,7 @@ local function dispatch_message(prototype, msg, sz, session, source, ...)
 		local p = assert(proto[prototype], prototype)
 		local f = p.dispatch
 		if f then
-			local co = coroutine.create(f)
+			local co = co_create(f)
 			session_coroutine_id[co] = session
 			session_coroutine_address[co] = source
 			suspend(co, coroutine.resume(co, session,source, p.unpack(msg,sz, ...)))
@@ -442,6 +477,7 @@ function dbgcmd.MEM()
 end
 
 function dbgcmd.GC()
+	coroutine_poll = {}
 	collectgarbage "collect"
 end
 
@@ -585,6 +621,15 @@ end
 
 function skynet.abort()
 	c.command("ABORT")
+end
+
+function skynet.context_ptr()
+	return c.context()
+end
+
+function skynet.monitor(service)
+	local monitor = skynet.uniqueservice(true, service)
+	c.command("MONITOR", string.format(":%08x", monitor))
 end
 
 return skynet

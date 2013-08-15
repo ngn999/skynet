@@ -11,8 +11,10 @@ local READREQUEST = {}	-- fd:request_size
 local READSESSION = {}	-- fd:session
 local READLOCK = {}	-- fd:queue(session)
 local READTHREAD= {} -- fd:thread
+local CLOSED = {} -- fd:true
 
 local selfaddr = skynet.self()
+local sockets = assert(skynet.localname ".socket")
 
 local function response(session)
 	skynet.redirect(selfaddr , 0, "response", session, "")
@@ -27,24 +29,26 @@ skynet.register_protocol {
 		local qsz = READREQUEST[fd]
 		local buf = READBUF[fd]
 		local bsz
-		if sz == 0 or buf == true then
-			buf,bsz = true, qsz
+		if sz == 0 then
+			CLOSED[fd] = true
 		else
 			buf,bsz = buffer.push(buf, msg, sz)
+			READBUF[fd] = buf
 		end
-		READBUF[fd] = buf
 		local session = READSESSION[fd]
 		if qsz == nil or session == nil then
 			return
 		end
-		if type(qsz) == "number" then
-			if qsz > bsz then
-				return
-			end
-		else
-			-- request readline
-			if buffer.readline(buf, qsz, true) == nil then
-				return
+		if sz > 0 then
+			if type(qsz) == "number" then
+				if qsz > bsz then
+					return
+				end
+			else
+				-- request readline
+				if buffer.readline(buf, qsz, true) == nil then
+					return
+				end
 			end
 		end
 
@@ -64,7 +68,7 @@ skynet.register_protocol {
 		if t > 0 then	-- lock request when t == 0
 			-- request bytes or readline
 			local buf = READBUF[fd]
-			if buf == true then
+			if CLOSED[fd] then
 				skynet.ret()
 				return
 			end
@@ -75,7 +79,7 @@ skynet.register_protocol {
 					skynet.ret()
 					return
 				end
-			else
+			elseif t == 2 then
 				-- sz is sep
 				if buffer.readline(buf, sz, true) then -- don't real read
 					skynet.ret()
@@ -91,61 +95,149 @@ local socket = {}
 
 function socket.open(addr, port)
 	local cmd = "open" .. " " .. (port and (addr..":"..port) or addr)
-	local r = skynet.call(".socket", "text", cmd)
+	local r = skynet.call(sockets, "text", cmd)
 	if r == "" then
-		error(cmd .. " failed")
+		return nil,  cmd .. " failed"
 	end
-	return tonumber(r)
+	local fd = tonumber(r)
+	READBUF[fd] = true
+	CLOSED[fd] = nil
+	return fd
 end
 
-function socket.stdin()
-	local r = skynet.call(".socket", "text", "bind 1")
+function socket.bind(sock)
+	local r = skynet.call(sockets, "text", "bind " .. tonumber(sock))
 	if r == "" then
 		error("stdin bind failed")
 	end
-	return tonumber(r)
+	local fd = tonumber(r)
+	READBUF[fd] = true
+	CLOSED[fd] = nil
+	return fd
+end
+
+function socket.stdin()
+	return socket.bind(1)
 end
 
 function socket.close(fd)
 	socket.lock(fd)
-	skynet.call(".socket", "text", "close", fd)
-	READBUF[fd] = true
+	skynet.call(sockets, "text", "close", fd)
+	READBUF[fd] = nil
 	READLOCK[fd] = nil
+	CLOSED[fd] = nil
 end
 
 function socket.read(fd, sz)
-	local str = buffer.pop(READBUF[fd],sz)
+	local buf = assert(READBUF[fd])
+	local str, bytes = buffer.pop(buf,sz)
 	if str then
 		return str
+	end
+
+	if CLOSED[fd] then
+		READBUF[fd] = nil
+		CLOSED[fd] = nil
+		str = buffer.pop(buf, bytes)
+		return nil, str
 	end
 
 	READREQUEST[fd] = sz
 	skynet.call(selfaddr, "system",fd,1,sz)	-- singal size 1
 	READREQUEST[fd] = nil
 
-	str = buffer.pop(READBUF[fd],sz)
-	return str
+	buf = READBUF[fd]
+
+	str, bytes = buffer.pop(buf,sz)
+	if str then
+		return str
+	end
+
+	if CLOSED[fd] then
+		READBUF[fd] = nil
+		CLOSED[fd] = nil
+		str = buffer.pop(buf, bytes)
+		return nil, str
+	end
+end
+
+function socket.readall(fd)
+	local buf = assert(READBUF[fd])
+	if CLOSED[fd] then
+		CLOSED[fd] = nil
+		READBUF[fd] = nil
+		if buf == nil then
+			return ""
+		end
+		local _, bytes = buffer.push(buf)
+		local ret = buffer.pop(buf, bytes)
+		return ret
+	end
+	READREQUEST[fd] = math.huge
+	skynet.call(selfaddr, "system",fd,3)	-- singal readall
+	READREQUEST[fd] = nil
+	assert(CLOSED[fd])
+	buf = READBUF[fd]
+	READBUF[fd] = nil
+	CLOSED[fd] = nil
+	if buf == nil then
+		return ""
+	end
+	local _, bytes = buffer.push(buf)
+	local ret = buffer.pop(buf, bytes)
+	return ret
 end
 
 function socket.readline(fd, sep)
-	local str = buffer.readline(READBUF[fd],sep)
+	local buf = assert(READBUF[fd])
+	local str = buffer.readline(buf,sep)
 	if str then
 		return str
+	end
+
+	if CLOSED[fd] then
+		READBUF[fd] = nil
+		CLOSED[fd] = nil
+		local _, bytes = buffer.push(buf)
+		str = buffer.pop(buf, bytes)
+		return nil, str
 	end
 
 	READREQUEST[fd] = sep
 	skynet.call(selfaddr, "system",fd,2,sep)	-- singal sep 2
 	READREQUEST[fd] = nil
 
-	str = buffer.readline(READBUF[fd],sep)
-	return str
+	buf = READBUF[fd]
+	str = buffer.readline(buf,sep)
+	if str then
+		return str
+	end
+
+	if CLOSED[fd] then
+		READBUF[fd] = nil
+		CLOSED[fd] = nil
+		local _, bytes = buffer.push(buf)
+		str = buffer.pop(buf, bytes)
+		return nil, str
+	end
 end
 
 function socket.write(fd, msg, sz)
-	skynet.send(".socket", "client", fd, msg, sz)
+	if CLOSED[fd] or not READBUF[fd] then
+		return
+	end
+	skynet.send(sockets, "client", fd, msg, sz)
+	return true
+end
+
+function socket.invalid(fd)
+	return CLOSED[fd] or not READBUF[fd]
 end
 
 function socket.lock(fd)
+	if CLOSED[fd] or not READBUF[fd] then
+		return
+	end
 	local locked = READTHREAD[fd]
 	if locked then
 		-- lock fd
