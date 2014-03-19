@@ -491,7 +491,7 @@ luaopen_skynet_c(lua_State *L) {
 	lua_createtable(L, 0, (sizeof(pack) + sizeof(l) + sizeof(l2))/sizeof(luaL_Reg)-1);
 	lua_newtable(L);
 	lua_pushstring(L,"__remote");
-	luaL_setfuncs(L,pack,2);
+	luaL_setfuncs(L,pack,2);            /* 2是指 "__remote", {}这两个upvalue */
 
 	lua_getfield(L, LUA_REGISTRYINDEX, "skynet_lua");
 	struct snlua *lua = lua_touserdata(L,-1);
@@ -501,17 +501,18 @@ luaopen_skynet_c(lua_State *L) {
 	assert(lua->L == L);
 
 	lua_pushvalue(L,-1);
-	lua_pushcclosure(L,_callback,1);
-	lua_setfield(L, -3, "callback");
+	lua_pushcclosure(L,_callback,1);    /* _G["skynet_lua"] */
+	lua_setfield(L, -3, "callback");    /* 添加 "callback" =  _callback 加入到lib */
 
 	lua_pushnil(L);
-	lua_pushcclosure(L,_reload,2);
-	lua_setfield(L, -2, "reload");
+	lua_pushcclosure(L,_reload,2);      /* nil, _G["skynet_lua"] */
+	lua_setfield(L, -2, "reload");      /* 添加"reload" = _reload 加入到lib */
 
 	lua_pushlightuserdata(L, lua->ctx);
 	luaL_setfuncs(L,l,1);               /* lua5.1用luaL_register(),5.2建议用luaL_setfuncs() */
+    /* 将l这组函数加入到lib */
 
-	luaL_setfuncs(L,l2,0);
+	luaL_setfuncs(L,l2,0);              /* 将l2这组函数加入到lib */
 
 	return 1;
 }
