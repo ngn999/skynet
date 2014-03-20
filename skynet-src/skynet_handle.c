@@ -34,7 +34,7 @@ skynet_handle_register(struct skynet_context *ctx) {
 
 	rwlock_wlock(&s->lock);
 	
-	for (;;) {
+	for (;;) {                         /* 担心空间不够，后面会*2,*2的放大空间 */
 		int i;
 		for (i=0;i<s->slot_size;i++) {
 			uint32_t handle = (i+s->handle_index) & HANDLE_MASK;
