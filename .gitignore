@@ -14,3 +14,9 @@ service/socket.so.dSYM
 service/tunnel.so.dSYM
 skynet
 skynet.dSYM
+
+/GPATH
+/GRTAGS
+/GTAGS
+
+/lua-int64/int64.so
