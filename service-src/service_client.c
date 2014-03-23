@@ -1,4 +1,5 @@
 #include "skynet.h"
+#include "skynet_socket.h"
 
 #include <stdint.h>
 #include <assert.h>
@@ -7,40 +8,43 @@
 #include <string.h>
 
 struct client {
-	int gate;
-	uint8_t id[4];
+	int id;
 };
 
 static int
 _cb(struct skynet_context * context, void * ud, int type, int session, uint32_t source, const void * msg, size_t sz) {
 	assert(sz <= 65535);
 	struct client * c = ud;
-	// tmp will be free by gate.
-	// see gate/mread.c : mread_push()
-	uint8_t *tmp = malloc(sz + 4 + 2);
-	memcpy(tmp, c->id, 4);
-	tmp[4] = (sz >> 8) & 0xff;
-	tmp[5] = sz & 0xff;
-	memcpy(tmp+6, msg, sz);
-
-	skynet_send(context, source, c->gate, PTYPE_CLIENT | PTYPE_TAG_DONTCOPY, 0, tmp, sz+6);
+	if (type == PTYPE_RESERVED_ERROR) {
+		// todo: tell client the session is broken
+		return 0;
+	}
+	if (type == PTYPE_RESPONSE) {
+		// todo: response to client with session, session may be packed into package
+	} else {
+		printf("client %d\n",type);
+		assert(type == PTYPE_TEXT);
+		// todo: support other protocol
+	}
+	// todo: design the protocol between client and agent
+	// tmp will be free by skynet_socket.
+	// see skynet_src/socket_server.c : send_socket()
+	uint8_t *tmp = malloc(sz + 2);
+	tmp[0] = (sz >> 8) & 0xff;
+	tmp[1] = sz & 0xff;
+	memcpy(tmp+2, msg, sz);
+	skynet_socket_send(context, c->id, tmp, sz+2);
 
 	return 0;
 }
 
 int
 client_init(struct client *c, struct skynet_context *ctx, const char * args) {
-	int fd = 0, gate = 0, id = 0;
-	sscanf(args, "%d %d %d",&fd,&gate,&id);
-	if (gate == 0) {
-		skynet_error(ctx, "Invalid init client %s",args);
+	int id = 0;
+	if (args == NULL)
 		return 1;
-	}
-	c->gate = gate;
-	c->id[0] = id & 0xff;
-	c->id[1] = (id >> 8) & 0xff;
-	c->id[2] = (id >> 16) & 0xff;
-	c->id[3] = (id >> 24) & 0xff;
+	sscanf(args, "%d",&id);
+	c->id = id;
 	skynet_callback(ctx, c, _cb);
 
 	return 0;

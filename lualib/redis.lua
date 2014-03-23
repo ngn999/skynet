@@ -22,6 +22,9 @@ function redis.connect(dbname)
 	local db_conf   =   name[dbname]
 	local fd = assert(socket.open(db_conf.host, db_conf.port or 6379))
 	local r = setmetatable( { __handle = fd, __mode = false }, meta )
+	if db_conf.auth ~= nil then
+		r:auth(db_conf.auth)
+	end
 	if db_conf.db ~= nil then
 		r:select(db_conf.db)
 	end
@@ -35,6 +38,9 @@ function command:disconnect()
 end
 
 local function compose_message(msg)
+	if #msg == 1 then
+		return msg[1] .. "\r\n"
+	end
 	local lines = { "*" .. #msg }
 	for _,v in ipairs(msg) do
 		local t = type(v)
@@ -63,11 +69,10 @@ redcmd[42] = function(fd, data)	-- '*'
 	for i = 1,n do
 		local line = readline(fd,"\r\n")
 		local bytes = tonumber(string.sub(line,2))
-		if bytes < 0 then
-			table.insert(bulk, nil)
-		else
+		if bytes >= 0 then
 			local data = readbytes(fd, bytes + 2)
-			table.insert(bulk, string.sub(data,1,-3))
+			-- bulk[i] = nil when bytes < 0
+			bulk[i] = string.sub(data,1,-3)
 		end
 	end
 	return true, bulk
@@ -135,6 +140,7 @@ end
 
 function command:sismember(key, value)
 	assert(not self.__mode, "sismember can't used in batch mode")
+	local fd = self.__handle
 	socket.lock(fd)
 	socket.write(fd, compose_message { "SISMEMBER", key, value })
 	local ok, ismember = read_response(fd)
@@ -154,9 +160,9 @@ function command:batch(mode)
 				allok = allok and ok
 				allret[i] = ret
 			end
-			assert(allok, "batch read failed")
-			socket.unlock(self.__handle)
 			self.__mode = false
+			socket.unlock(self.__handle)
+			assert(allok, "batch read failed")
 			return allret
 		else
 			local allok = true
@@ -164,16 +170,90 @@ function command:batch(mode)
 				local ok = read_response(fd)
 				allok = allok and ok
 			end
-			socket.unlock(self.__handle)
 			self.__mode = false
+			socket.unlock(self.__handle)
 			return allok
 		end
 	else
 		assert(mode == "read" or mode == "write")
+		socket.lock(self.__handle)
 		self.__mode = mode
 		self.__batch = 0
-		socket.lock(self.__handle)
 	end
+end
+
+function command:multi()
+	local fd = self.__handle
+	socket.lock(fd)
+	self.__mode = "multi"
+	self.__batch = 0
+	socket.write(fd, "MULTI\r\n")
+end
+
+local function read_exec(fd)
+	local result = readline(fd, "\r\n")
+	local firstchar = string.byte(result)
+	local data = string.sub(result,2)
+	if firstchar ~= 42 then
+		return false, data
+	end
+
+	local n = tonumber(data)
+	local result = {}
+	local err = nil
+	for i = 1,n do
+		local ok, r = read_response(fd)
+		result[i] = r
+		if err then
+			err[i] = ok
+		else
+			if ok == false then
+				err = {}
+				for j = 1, i-1 do
+					err[j] = true
+				end
+				err[i] = false
+			end
+		end
+	end
+	return result, err
+end
+
+function command:exec()
+	if self.__mode ~= "multi" then
+		error "call multi first"
+	end
+	local fd = self.__handle
+	socket.write(fd, "EXEC\r\n")
+	local allok = true
+	for i = 0, self.__batch do
+		local ok, queue = read_response(fd)
+		allok = allok and ok
+	end
+	if not allok then
+		self.__mode = false
+		socket.unlock(fd)
+		error "Queue command error"
+	end
+
+	local result, err = read_exec(fd)
+
+	self.__mode = false
+	socket.unlock(fd)
+
+	if not result then
+		error(err)
+	elseif err then
+		local errmsg = ""
+		for k,v in ipairs(err) do
+			if v == false then
+				errmsg = errmsg .. k .. ":" .. result[k]
+			end
+		end
+		error(errmsg)
+	end
+
+	return result
 end
 
 return redis

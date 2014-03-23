@@ -9,7 +9,7 @@ function command:open(parm)
 	local fd,addr = string.match(parm,"(%d+) ([^%s]+)")
 	fd = tonumber(fd)
 	print("agent open",self,string.format("%d %d %s",self,fd,addr))
-	local client = skynet.launch("client",fd, gate, self)
+	local client = skynet.launch("client",fd)
 	local agent = skynet.launch("snlua","agent",skynet.address(client))
 	if agent then
 		agent_all[self] = { agent , client }
@@ -37,7 +37,7 @@ end
 
 skynet.register_protocol {
 	name = "client",
-	id = 3,
+	id = skynet.PTYPE_CLIENT,
 }
 
 skynet.start(function()

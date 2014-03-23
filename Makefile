@@ -26,9 +26,8 @@ all : \
   service/tunnel.so \
   service/harbor.so \
   service/localcast.so \
-  service/socket.so \
   luaclib/skynet.so \
-  luaclib/socketbuffer.so \
+  luaclib/socketdriver.so \
   luaclib/int64.so \
   luaclib/mcast.so \
   luaclib/bson.so \
@@ -49,6 +48,8 @@ skynet : \
   skynet-src/skynet_group.c \
   skynet-src/skynet_env.c \
   skynet-src/skynet_monitor.c \
+  skynet-src/skynet_socket.c \
+  skynet-src/socket_server.c \
   luacompat/compat52.c
 	gcc $(CFLAGS) -Iluacompat -o $@ $^ -Iskynet-src $(LDFLAGS)
 
@@ -70,26 +71,23 @@ service/harbor.so : service-src/service_harbor.c
 service/logger.so : skynet-src/skynet_logger.c
 	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
 
-service/snlua.so : service-src/service_lua.c
+service/snlua.so : service-src/service_lua.c service-src/luacode_cache.c service-src/luaalloc.c
 	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ -Iskynet-src
 
-service/gate.so : gate/mread.c gate/ringbuffer.c gate/main.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Igate -Iskynet-src -Iservice-src
+service/gate.so : service-src/service_gate.c
+	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
 
 service/localcast.so : service-src/service_localcast.c
 	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
 
-luaclib/skynet.so : lualib-src/lua-skynet.c lualib-src/lua-seri.c lualib-src/lua-remoteobj.c lualib-src/trace_service.c | luaclib
+luaclib/skynet.so : lualib-src/lua-skynet.c lualib-src/lua-seri.c lualib-src/trace_service.c lualib-src/timingqueue.c | luaclib
 	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ -Iskynet-src -Iservice-src -Ilualib-src
 
 service/client.so : service-src/service_client.c
 	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
 
-service/socket.so : service-src/service_socket.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
-
-luaclib/socketbuffer.so : lualib-src/lua-socket.c | luaclib
-	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ -Iskynet-src
+luaclib/socketdriver.so : lualib-src/lua-socket.c | luaclib
+	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ -Iskynet-src -Iservice-src
 
 luaclib/int64.so : lua-int64/int64.c | luaclib
 	gcc $(CFLAGS) $(SHARED) -Iluacompat -O2 $^ -o $@ 

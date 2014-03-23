@@ -11,6 +11,14 @@ function command.HELLO()
 	skynet.ret(skynet.pack("hello"))
 end
 
+function command.EXIT()
+	skynet.exit()
+end
+
+function command.ERROR()
+	error "throw an error"
+end
+
 skynet.start(function()
 	skynet.dispatch("lua", function(session,addr, cmd, ...)
 		command[cmd](...)

@@ -5,9 +5,26 @@ local tonumber = tonumber
 local coroutine = coroutine
 local assert = assert
 local pairs = pairs
+local pcall = pcall
 
 local proto = {}
-local skynet = {}
+local skynet = {
+	-- read skynet.h
+	PTYPE_TEXT = 0,
+	PTYPE_RESPONSE = 1,
+	PTYPE_MULTICAST = 2,
+	PTYPE_CLIENT = 3,
+	PTYPE_SYSTEM = 4,
+	PTYPE_HARBOR = 5,
+	PTYPE_SOCKET = 6,
+	PTYPE_ERROR = 7,
+	PTYPE_QUEUE = 8,
+	PTYPE_DEBUG = 9,
+	PTYPE_LUA = 10
+}
+
+-- code cache
+skynet.cache = require "skynet.codecache"
 
 function skynet.register_protocol(class)
 	local name = class.name
@@ -25,22 +42,81 @@ local session_coroutine_address = {}
 local wakeup_session = {}
 local sleep_session = {}
 
+local watching_service = {}
+local watching_session = {}
+local error_queue = {}
+
+-- timing remote call, turn off by default. Use skynet.timing_call() to turn on.
+local timing_call = nil
+
+-- suspend is function
+local suspend
+
 local trace_handle
 local trace_func = function() end
 
+local function string_to_handle(str)
+	return tonumber("0x" .. string.sub(str , 2))
+end
+
+----- monitor exit
+
+local function dispatch_error_queue()
+	local session = table.remove(error_queue,1)
+	if session then
+		local co = session_id_coroutine[session]
+		session_id_coroutine[session] = nil
+		c.trace_switch(trace_handle, session)
+		return suspend(co, coroutine.resume(co, false))
+	end
+end
+
+local function _error_dispatch(error_session, monitor, service)
+	if service then
+		-- service is down
+		--  Don't remove from watching_service , because user may call dead service
+		watching_service[service] = false
+		for session, srv in pairs(watching_session) do
+			if srv == service then
+				table.insert(error_queue, session)
+			end
+		end
+	else
+		-- capture an error for error_session
+		if watching_session[error_session] then
+			table.insert(error_queue, error_session)
+		end
+	end
+end
+
+local watch_monitor
+
+function skynet.watch(service)
+	assert(type(service) == "number")
+	if watch_monitor == nil then
+		watch_monitor = string_to_handle(c.command("MONITOR"))
+		assert(watch_monitor, "Need a monitor")
+	end
+	if watching_service[service] == nil then
+		watching_service[service] = true
+		-- read lualib/simplemonitor.lua
+		assert(skynet.call(watch_monitor, "lua", "WATCH", service), "watch a dead service")
+	end
+end
+
 -- coroutine reuse
 
-local coroutine_poll = {}
+local coroutine_pool = {}
 local coroutine_yield = coroutine.yield
 
 local function co_create(f)
-	local co = table.remove(coroutine_poll)
+	local co = table.remove(coroutine_pool)
 	if co == nil then
 		co = coroutine.create(function(...)
 			f(...)
 			while true do
 				f = nil
-				coroutine_poll[#coroutine_poll] = co
+				coroutine_pool[#coroutine_pool] = co
 				f = coroutine_yield "EXIT"
 				f(coroutine_yield())
 			end
@@ -50,9 +126,6 @@ local function co_create(f)
 	end
 	return co
 end
-
--- suspend is function
-local suspend
 
 local function dispatch_wakeup()
 	local co = next(wakeup_session)
@@ -78,6 +151,13 @@ end
 function suspend(co, result, command, param, size)
 	if not result then
 		trace_count()
+		local session = session_coroutine_id[co]
+		local addr = session_coroutine_address[co]
+		if session and session ~= 0  then
+			c.send(addr, skynet.PTYPE_ERROR, session, "")
+		end
+		session_coroutine_id[co] = nil
+		session_coroutine_address[co] = nil
 		error(debug.traceback(co,command))
 	end
 	if command == "CALL" then
@@ -90,12 +170,14 @@ function suspend(co, result, command, param, size)
 	elseif command == "RETURN" then
 		local co_session = session_coroutine_id[co]
 		local co_address = session_coroutine_address[co]
-		-- PTYPE_RESPONSE = 1 , see skynet.h
 		if param == nil then
 			trace_count()
 			error(debug.traceback(co))
 		end
-		c.send(co_address, 1, co_session, param, size)
+		-- c.send maybe throw a error, so call trace_count first.
+		-- The coroutine execute time after skynet.ret() will not be trace.
+		trace_count()
+		c.send(co_address, skynet.PTYPE_RESPONSE, co_session, param, size)
 		return suspend(co, coroutine.resume(co))
 	elseif command == "EXIT" then
 		-- coroutine exit
@@ -107,6 +189,7 @@ function suspend(co, result, command, param, size)
 	end
 	trace_count()
 	dispatch_wakeup()
+	dispatch_error_queue()
 end
 
 function skynet.timeout(ti, func)
@@ -122,7 +205,7 @@ function skynet.sleep(ti)
 	local session = c.command("TIMEOUT",tostring(ti))
 	assert(session)
 	session = tonumber(session)
-	local ret = coroutine_yield("SLEEP", session)
+	local succ, ret = coroutine_yield("SLEEP", session)
 	sleep_session[coroutine.running()] = nil
 	if ret == true then
 		c.trace_switch(trace_handle, session)
@@ -131,15 +214,13 @@ function skynet.sleep(ti)
 end
 
 function skynet.yield()
-	local session = c.command("TIMEOUT","0")
-	assert(session)
-	coroutine_yield("SLEEP", tonumber(session))
-	sleep_session[coroutine.running()] = nil
+	return skynet.sleep("0")
 end
 
 function skynet.wait()
 	local session = c.genid()
 	coroutine_yield("SLEEP", session)
+	c.trace_switch(trace_handle, session)
 	local co = coroutine.running()
 	sleep_session[co] = nil
 	session_id_coroutine[session] = nil
@@ -151,10 +232,6 @@ end
 
 function skynet.name(name, handle)
 	c.command("NAME", name .. " " .. handle)
-end
-
-local function string_to_handle(str)
-	return tonumber("0x" .. string.sub(str , 2))
 end
 
 local self_handle
@@ -208,6 +285,9 @@ end
 
 function skynet.send(addr, typename, ...)
 	local p = proto[typename]
+	if watching_service[addr] == false then
+		error("Service is dead")
+	end
 	return c.send(addr, p.id, 0 , p.pack(...))
 end
 
@@ -229,23 +309,41 @@ skynet.pack = assert(c.pack)
 skynet.unpack = assert(c.unpack)
 skynet.tostring = assert(c.tostring)
 
+local function yield_call(service, session)
+	watching_session[session] = service
+	local succ, msg, sz = coroutine_yield("CALL", session)
+	watching_session[session] = nil
+	assert(succ, "Capture an error")
+	return msg,sz
+end
+
 function skynet.call(addr, typename, ...)
 	local p = proto[typename]
+	if watching_service[addr] == false then
+		error("Service is dead")
+	end
 	local session = c.send(addr, p.id , nil , p.pack(...))
-	return p.unpack(coroutine_yield("CALL", session))
+	if session == nil then
+		error("call to invalid address " .. skynet.address(addr))
+	end
+	return p.unpack(yield_call(addr, session))
 end
 
 function skynet.blockcall(addr, typename , ...)
 	local p = proto[typename]
 	c.command("LOCK")
 	local session = c.send(addr, p.id , nil , p.pack(...))
-	return p.unpack(coroutine_yield("CALL", session))
+	if session == nil then
+		c.command("UNLOCK")
+		error("call to invalid address " .. skynet.address(addr))
+	end
+	return p.unpack(yield_call(addr, session))
 end
 
 function skynet.rawcall(addr, typename, msg, sz)
 	local p = proto[typename]
-	local session = c.send(addr, p.id , nil , msg, sz)
-	return coroutine_yield("CALL", session)
+	local session = assert(c.send(addr, p.id , nil , msg, sz), "call to invalid address")
+	return yield_call(addr, session)
 end
 
 function skynet.ret(msg, sz)
@@ -279,27 +377,45 @@ end
 
 local fork_queue = {}
 
+local tunpack = table.unpack
+
 function skynet.fork(func,...)
 	local args = { ... }
 	local co = co_create(function()
-		func(unpack(args))
+		func(tunpack(args))
 	end)
 	table.insert(fork_queue, co)
 end
 
-local function dispatch_message(prototype, msg, sz, session, source, ...)
-	-- PTYPE_RESPONSE = 1, read skynet.h
+local function timing(session, source, ti)
+	if ti == nil then
+		return
+	end
+	local t = timing_call[source]
+	if t == nil then
+		t = { n = 1, ti = ti }
+		timing_call[source] = t
+	else
+		t.n = t.n + 1
+		t.ti = t.ti + ti
+	end
+end
+
+local function raw_dispatch_message(prototype, msg, sz, session, source, ...)
+	-- skynet.PTYPE_RESPONSE = 1, read skynet.h
 	if prototype == 1 then
+		if timing_call then
+			timing(session, source, ...)
+		end
 		local co = session_id_coroutine[session]
 		if co == "BREAK" then
 			session_id_coroutine[session] = nil
 		elseif co == nil then
-			c.trace_switch(trace_handle, session)
 			unknown_response(session, source, msg, sz)
 		else
 			c.trace_switch(trace_handle, session)
 			session_id_coroutine[session] = nil
-			suspend(co, coroutine.resume(co, msg, sz))
+			suspend(co, coroutine.resume(co, true, msg, sz))
 		end
 	else
 		local p = assert(proto[prototype], prototype)
@@ -308,20 +424,33 @@ local function dispatch_message(prototype, msg, sz, session, source, ...)
 			local co = co_create(f)
 			session_coroutine_id[co] = session
 			session_coroutine_address[co] = source
-			suspend(co, coroutine.resume(co, session,source, p.unpack(msg,sz, ...)))
+			suspend(co, coroutine.resume(co, session,source, p.unpack(msg,sz,...)))
 		else
 			print("Unknown request :" , p.unpack(msg,sz))
 			error(string.format("Can't dispatch type %s : ", p.name))
 		end
 	end
+end
+
+local function dispatch_message(...)
+	local succ, err = pcall(raw_dispatch_message,...)
 	while true do
 		local key,co = next(fork_queue)
 		if co == nil then
-			return
+			break
 		end
 		fork_queue[key] = nil
-		suspend(co,coroutine.resume(co))
+		local fork_succ, fork_err = pcall(suspend,co,coroutine.resume(co))
+		if not fork_succ then
+			if succ then
+				succ = false
+				err = fork_err
+			else
+				err = err .. "\n" .. fork_err
+			end
+		end
 	end
+	assert(succ, err)
 end
 
 function skynet.newservice(name, ...)
@@ -335,20 +464,25 @@ function skynet.newservice(name, ...)
 end
 
 function skynet.uniqueservice(global, ...)
-	local t = 0
-	while true do
-		local handle
-		if global == true then
-			handle = skynet.call("SERVICE", "lua", ...)
-		else
-			handle = skynet.call(".service", "lua", global, ...)
-		end
-		if handle ~= false then
-			return handle
-		end
-		skynet.sleep(t)
-		t=t+1
+	local handle
+	if global == true then
+		handle = skynet.call("SERVICE", "lua", "LAUNCH", ...)
+	else
+		handle = skynet.call(".service", "lua", "LAUNCH", global, ...)
 	end
+	assert(handle , "Unique service launch failed")
+	return handle
+end
+
+function skynet.queryservice(global, ...)
+	local handle
+	if global == true then
+		handle = skynet.call("SERVICE", "lua", "QUERY", ...)
+	else
+		handle = skynet.call(".service", "lua", "QUERY", global, ...)
+	end
+	assert(handle , "Unique service query failed")
+	return handle
 end
 
 local function group_command(cmd, handle, address)
@@ -376,89 +510,15 @@ function skynet.query_group(handle)
 end
 
 function skynet.address(addr)
-	return string.format(":%x",addr)
+	if type(addr) == "number" then
+		return string.format(":%x",addr)
+	else
+		return tostring(addr)
+	end
 end
 
 function skynet.harbor(addr)
 	return c.harbor(addr)
-end
-
------- remote object --------
-
-do
-	-- proto is 11
-
-	local remote_query, remote_alloc, remote_bind = c.remote_init(skynet.self())
-	local weak_meta = { __mode = "kv" }
-	local meta = getmetatable(c.unpack(c.pack({ __remote = 0 })))
-	local remote_call_func = setmetatable({}, weak_meta)
-
-	local _send = assert(c.send)
-	local _yield = coroutine.yield
-	local _pack = assert(c.pack)
-	local _unpack = assert(c.unpack)
-	local _local = skynet.self()
-
-	function meta__index(t, method)
-		local f = remote_call_func[method]
-		if f == nil then
-			f = function(...)
-				local addr = remote_query(t.__remote)
-				-- the proto is 11 (lua is 10)
-				local session = _send(addr, 11 , nil, _pack(t,method,...))
-				local msg, sz = _yield("CALL", session)
-				return select(2,assert(_unpack(msg,sz)))
-			end
-			remote_call_func[method] = f
-		end
-		rawset(t,method,f)
-		return f
-	end
-
-	-- prevent gc
-	meta.__index = meta__index
-
-	meta.__newindex = error
-
-	function skynet.remote_create(t, handle)
-		t = t or {}
-		if handle then
-			remote_bind(handle)
-		else
-			handle = remote_alloc()
-		end
-		rawset(t, "__remote" , handle)
-		rawset(meta, handle, t)
-		return t
-	end
-
-	function skynet.remote_bind(handle)
-		return setmetatable( { __remote = handle } , meta)
-	end
-
-	local function remote_call(obj, method, ...)
-		if type(obj) ~= "table" or type(method) ~= "string" then
-			return _yield("RETURN", _pack(false, "Invalid call"))
-		end
-		local f = obj[method]
-		if type(f) ~= "function" then
-			return _yield("RETURN", _pack(false, "Object has not method " .. method))
-		end
-		return _yield("RETURN", _pack(pcall(f,...)))
-	end
-
-	function skynet.remote_root()
-		return skynet.remote_bind(0)
-	end
-
-	skynet.register_protocol {
-		name = "remoteobj",
-		id = 11,
-		unpack = c.unpack,
-		dispatch = function (session, source, ...)
-			remote_call(...)
-		end
-	}
 end
 
 ----- debug
@@ -477,7 +537,7 @@ function dbgcmd.MEM()
 end
 
 function dbgcmd.GC()
-	coroutine_poll = {}
+	coroutine_pool = {}
 	collectgarbage "collect"
 end
 
@@ -489,6 +549,8 @@ function dbgcmd.STAT()
 	local stat = {}
 	query_state(stat, "count")
 	query_state(stat, "time")
+	stat.boottime = debug.getregistry().skynet_boottime
+	stat.mqlen = skynet.mqlen()
 	skynet.ret(skynet.pack(stat))
 end
 
@@ -497,6 +559,18 @@ function dbgcmd.INFO()
 		skynet.ret(skynet.pack(internal_info_func()))
 	else
 		skynet.ret(skynet.pack(nil))
+	end
+end
+
+function dbgcmd.TIMING()
+	if timing_call then
+		skynet.ret(skynet.pack(timing_call))
+		-- turn off timing
+		timing_call = nil
+	else
+		-- turn on timing
+		timing_call = {}
+		skynet.ret(skynet.pack(timing_call))
 	end
 end
 
@@ -517,7 +591,7 @@ do
 
 	REG {
 		name = "text",
-		id = 0,
+		id = skynet.PTYPE_TEXT,
 		pack = function (...)
 			local n = select ("#" , ...)
 			if n == 0 then
@@ -533,22 +607,30 @@ do
 
 	REG {
 		name = "lua",
-		id = 10,
+		id = skynet.PTYPE_LUA,
 		pack = skynet.pack,
 		unpack = skynet.unpack,
 	}
 
 	REG {
 		name = "response",
-		id = 1,
+		id = skynet.PTYPE_RESPONSE,
 	}
 
 	REG {
 		name = "debug",
-		id = 9,
+		id = skynet.PTYPE_DEBUG,
 		pack = skynet.pack,
 		unpack = skynet.unpack,
 		dispatch = _debug_dispatch,
+	}
+
+	REG {
+		name = "error",
+		id = skynet.PTYPE_ERROR,
+		pack = skynet.pack,
+		unpack = skynet.unpack,
+		dispatch = _error_dispatch,
 	}
 end
 
@@ -583,13 +665,23 @@ local function init_template(start)
 	init_all()
 end
 
+local function init_service(start)
+	local ok, err = xpcall(init_template, debug.traceback, start)
+	if not ok then
+		print("init service failed:", err)
+		skynet.send(".launcher","text", "ERROR")
+		skynet.exit()
+	else
+		skynet.send(".launcher","text", "")
+	end
+end
+
 function skynet.start(start_func)
 	c.callback(dispatch_message)
 	trace_handle = assert(c.stat "trace")
 	skynet.timeout(0, function()
-                         init_template(start_func)
-                         skynet.send(".launcher","text", "")
-                      end)
+		init_service(start_func)
+	end)
 end
 
 function skynet.filter(f ,start_func)
@@ -598,8 +690,7 @@ function skynet.filter(f ,start_func)
 	end)
 	trace_handle = assert(c.stat "trace")
 	skynet.timeout(0, function()
-	init_template(start_func)
-		skynet.send(".launcher","text", "")
+		init_service(start_func)
 	end)
 end
 
@@ -627,9 +718,29 @@ function skynet.context_ptr()
 	return c.context()
 end
 
-function skynet.monitor(service)
-	local monitor = skynet.uniqueservice(true, service)
+function skynet.monitor(service, query)
+	local monitor
+	if query then
+		monitor = skynet.queryservice(true, service)
+	else
+		monitor = skynet.uniqueservice(true, service)
+	end
+	assert(monitor, "Monitor launch failed")
 	c.command("MONITOR", string.format(":%08x", monitor))
+end
+
+function skynet.mqlen()
+	return tonumber(c.command "MQLEN")
+end
+
+function skynet.timing_call(tc)
+	local ret = timing_call
+	timing_call = tc or {}
+	return ret
+end
+
+function skynet.timing_session(session)
+	return c.timing(session)
 end
 
 return skynet

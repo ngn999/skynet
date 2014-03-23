@@ -1,14 +1,15 @@
 local skynet = require "skynet"
 
+local max_client = 64
+
 skynet.start(function()
 	print("Server start")
-	skynet.launch("socket",128)
 	local service = skynet.newservice("service_mgr")
 	skynet.monitor "simplemonitor"
 	local lualog = skynet.newservice("lualog")
 	local console = skynet.newservice("console")
-	local remoteroot = skynet.newservice("remote_root")
-	local watchdog = skynet.newservice("watchdog","8888 4 0")
+--	skynet.newservice("debug_console",8000)
+	local watchdog = skynet.newservice("watchdog","8888", max_client, 0)
 	local db = skynet.newservice("simpledb")
 --	skynet.launch("snlua","testgroup")
 

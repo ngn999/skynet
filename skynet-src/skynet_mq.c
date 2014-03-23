@@ -56,7 +56,6 @@ skynet_globalmq_push(struct message_queue * queue) {
 	q->queue[tail] = queue;
 	__sync_synchronize();
 	q->flag[tail] = true;
-	__sync_synchronize();
 }
 
 struct message_queue * 
@@ -72,12 +71,13 @@ skynet_globalmq_pop() {
 		return NULL;
 	}
 
+	__sync_synchronize();
+
 	struct message_queue * mq = q->queue[head_ptr];
 	if (!__sync_bool_compare_and_swap(&q->head, head, head+1)) {
 		return NULL;
 	}
 	q->flag[head_ptr] = false;
-	__sync_synchronize();
 
 	return mq;
 }
@@ -109,6 +109,21 @@ skynet_mq_handle(struct message_queue *q) {
 	return q->handle;
 }
 
+int
+skynet_mq_length(struct message_queue *q) {
+	int head, tail,cap;
+
+	LOCK(q)
+	head = q->head;
+	tail = q->tail;
+	cap = q->cap;
+	UNLOCK(q)
+	
+	if (head <= tail) {
+		return tail - head;
+	}
+	return tail + cap - head;
+}
 
 int
 skynet_mq_pop(struct message_queue *q, struct skynet_message *message) {
@@ -147,6 +162,19 @@ expand_queue(struct message_queue *q) {
 	q->queue = new_queue;
 }
 
+static void
+_unlock(struct message_queue *q) {
+	// this api use in push a unlock message, so the in_global flags must not be 0 , 
+	// but the q is not exist in global queue.
+	if (q->in_global == MQ_LOCKED) {
+		skynet_globalmq_push(q);
+		q->in_global = MQ_IN_GLOBAL;
+	} else {
+		assert(q->in_global == MQ_DISPATCHING);
+	}
+	q->lock_session = 0;
+}
+
 static void 
 _pushhead(struct message_queue *q, struct skynet_message *message) {
 	int head = q->head - 1;
@@ -162,15 +190,7 @@ _pushhead(struct message_queue *q, struct skynet_message *message) {
 	q->queue[head] = *message;
 	q->head = head;
 
-	// this api use in push a unlock message, so the in_global flags must not be 0 , 
-	// but the q is not exist in global queue.
-	if (q->in_global == MQ_LOCKED) {
-		skynet_globalmq_push(q);
-		q->in_global = MQ_IN_GLOBAL;
-	} else {
-		assert(q->in_global == MQ_DISPATCHING);
-	}
-	q->lock_session = 0;
+	_unlock(q);
 }
 
 void 
@@ -211,6 +231,13 @@ skynet_mq_lock(struct message_queue *q, int session) {
 	UNLOCK(q)
 }
 
+void
+skynet_mq_unlock(struct message_queue *q) {
+	LOCK(q)
+	_unlock(q);
+	UNLOCK(q)
+}
+
 void 
 skynet_mq_init() {
 	struct global_queue *q = malloc(sizeof(*q));
@@ -244,8 +271,13 @@ skynet_mq_pushglobal(struct message_queue *queue) {
 
 void 
 skynet_mq_mark_release(struct message_queue *q) {
+	LOCK(q)
 	assert(q->release == 0);
 	q->release = 1;
+	if (q->in_global != MQ_IN_GLOBAL) {
+		skynet_globalmq_push(q);
+	}
+	UNLOCK(q)
 }
 
 static int
