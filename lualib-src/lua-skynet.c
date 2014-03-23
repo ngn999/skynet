@@ -555,18 +555,19 @@ luaopen_skynet_c(lua_State *L) {
 	assert(lua->L == L);
 
 	lua_pushvalue(L,-1);
-	lua_pushcclosure(L,_callback,1);
-	lua_setfield(L, -3, "callback");
+	lua_pushcclosure(L,_callback,1);    /* _G["skynet_lua"] */
+    /* -1: _callback closure, -2: _G["skynet_lua"], -3: the lib table */
+	lua_setfield(L, -3, "callback");    /* 添加 "callback" =  _callback 加入到lib */
 
 	lua_pushnil(L);
-	lua_pushcclosure(L,_reload,2);
-	lua_setfield(L, -2, "reload");
+	lua_pushcclosure(L,_reload,2);      /* nil, _G["skynet_lua"] */
+	lua_setfield(L, -2, "reload");      /* 添加"reload" = _reload 加入到lib */
 
 	lua_pushlightuserdata(L, lua->ctx);
 	lua_pushnil(L);
 	luaL_setfuncs(L,l,2);
 
-	luaL_setfuncs(L,l2,0);
+	luaL_setfuncs(L,l2,0);              /* 将l2这组函数加入到lib */
 
 	return 1;
 }

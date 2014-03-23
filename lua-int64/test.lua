@@ -1,6 +1,6 @@
 lib = require "int64"
 
-local int64 = lib.new
+local int64 = lib.new           -- 方法别名
 print(lib.tostring(int64 "\1\2\3\4\5\6\7\8"))
 
 a = 1 + int64(1)

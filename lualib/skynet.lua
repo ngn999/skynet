@@ -1,4 +1,5 @@
 local c = require "skynet.c"            -- 加.c是为了找到skynet.so, 当然可能误伤skynet/c.lua
+-- require("a.b.c") 你就知道什么了。
 local mc = require "mcast.c"            -- 加载mcast.so, 可能误伤mcast/c.lua
 local tostring = tostring
 local tonumber = tonumber

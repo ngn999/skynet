@@ -120,7 +120,7 @@ _worker(void *p) {
 	struct skynet_monitor *sm = m->m[id];
 	for (;;) {
 		if (skynet_context_message_dispatch(sm)) {
-			CHECK_ABORT
+			CHECK_ABORT;                /* global queue is empty */
 			if (pthread_mutex_lock(&m->mutex) == 0) {
 				++ m->sleep;
 				// "spurious wakeup" is harmless,

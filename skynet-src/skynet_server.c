@@ -1,3 +1,4 @@
+/* -*- coding:gbk-unix-*- */
 #include "skynet_server.h"
 #include "skynet_module.h"
 #include "skynet_handle.h"
