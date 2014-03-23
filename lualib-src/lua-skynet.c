@@ -502,6 +502,7 @@ luaopen_skynet_c(lua_State *L) {
 
 	lua_pushvalue(L,-1);
 	lua_pushcclosure(L,_callback,1);    /* _G["skynet_lua"] */
+    /* -1: _callback closure, -2: _G["skynet_lua"], -3: the lib table */
 	lua_setfield(L, -3, "callback");    /* 添加 "callback" =  _callback 加入到lib */
 
 	lua_pushnil(L);
