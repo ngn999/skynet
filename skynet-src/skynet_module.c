@@ -127,7 +127,7 @@ skynet_module_instance_create(struct skynet_module *m) {
 
 int
 skynet_module_instance_init(struct skynet_module *m, void * inst, struct skynet_context *ctx, const char * parm) {
-	return m->init(inst, ctx, parm);
+	return m->init(inst, ctx, parm);    /* inst just like this pointer */
 }
 
 void 
