@@ -58,7 +58,7 @@ _worker(void *p) {
 	struct skynet_monitor *sm = p;
 	for (;;) {
 		if (skynet_context_message_dispatch(sm)) {
-			CHECK_ABORT;
+			CHECK_ABORT;                /* global queue is empty */
 			usleep(1000);
 		} 
 	}
