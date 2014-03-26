@@ -7,7 +7,7 @@ function command:open(parm)
 	local fd,addr = string.match(parm,"(%d+) ([^%s]+)")
 	fd = tonumber(fd)
 	skynet.send("LOG", string.format("%d %d %s",self,fd,addr))
-	local client = skynet.launch("client",fd)
+	local client = skynet.launch("client",fd) -- client handle
 	skynet.send("LOG", "client " .. client)
 	local agent = skynet.launch("snlua","agent.lua",client)
 	if agent then
@@ -36,7 +36,7 @@ skynet.dispatch(function(message)
 	id = tonumber(id)
 	local f = command[cmd]
 	if f then
-		f(id,parm)
+		f(id,parm)              -- 这个太贱了。。。
 	else
 		skynet.error(string.format("[watchdog] Unknown command : %s",message))
 	end
