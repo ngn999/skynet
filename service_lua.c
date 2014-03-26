@@ -43,10 +43,10 @@ snlua_init(lua_State *L, struct skynet_context *ctx, const char * args) {
 	char *parm = tmp;
 	strcpy(parm,args);
 
-	lua_pushcfunction(L, traceback);
+	lua_pushcfunction(L, traceback);    /* error handle function */
 
 	const char * filename = parm;
-	int r = _load(L, &parm);
+	int r = _load(L, &parm);            /* truncate filename in space */
 	if (r) {
 		skynet_error(ctx, "lua parser [%s] error : %s", filename, lua_tostring(L,-1));
 		return 1;
