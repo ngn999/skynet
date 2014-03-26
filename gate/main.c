@@ -90,7 +90,7 @@ _ctrl(struct skynet_context * ctx, struct gate * g, const void * msg, int sz) {
 	if (memcmp(command,"forward",i)==0) {
 		_parm(tmp, sz, i);
 		char * start = tmp;
-		char * data = strsep(&start, " ");
+		char * data = strsep(&start, " "); /* forward id start */
 		int id = strtol(data , NULL, 10);
 		if (start) {
 			_forward_agent(g, id, start);
