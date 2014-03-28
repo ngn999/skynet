@@ -190,8 +190,8 @@ _start_master(const char * master) {
 void 
 skynet_start(struct skynet_config * config) {
 	skynet_group_init();
-	skynet_harbor_init(config->harbor);
-	skynet_handle_init(config->harbor);
+	skynet_harbor_init(config->harbor); /* 一个本机的id */
+	skynet_handle_init(config->harbor); /*  */
 	skynet_mq_init();
 	skynet_module_init(config->module_path);
 	skynet_timer_init();
@@ -211,7 +211,7 @@ skynet_start(struct skynet_config * config) {
 		}
 	}
 	// harbor must be init first
-	if (skynet_harbor_start(config->master , config->local)) {
+	if (skynet_harbor_start(config->master , config->local)) { /* config:address */
 		fprintf(stderr, "Init fail : no master");
 		return;
 	}
