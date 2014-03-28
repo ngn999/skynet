@@ -7,10 +7,11 @@ skynet.register_protocol {
 	pack = function(...) return ... end,
 	unpack = skynet.tostring,
 	dispatch = function (session, address, text)
-		-- It's client, there is no session
-		skynet.send("LOG", "text", "client message :" .. text)
-		local result = skynet.call("SIMPLEDB", "text", text)
-		skynet.ret(result)
+       -- It's client, there is no session
+       skynet.send("LOG", "text", "client message :" .. text)
+       -- local result = skynet.call("SIMPLEDB", "text", text)
+       local result = skynet.call("ECHO", "text", text)
+       skynet.ret(result)
 	end
 }
 
