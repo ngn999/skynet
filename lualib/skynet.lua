@@ -681,7 +681,7 @@ function skynet.start(start_func)
 	c.callback(dispatch_message)
 	trace_handle = assert(c.stat "trace")
 	skynet.timeout(0, function()
-		init_service(start_func)
+                      init_service(start_func)
 	end)
 end
 

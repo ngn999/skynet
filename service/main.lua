@@ -14,5 +14,5 @@ skynet.start(function()
       local db = skynet.newservice("echo")
       --	skynet.launch("snlua","testgroup")
 
-	skynet.exit()
+      skynet.exit()
 end)
