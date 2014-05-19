@@ -1,6 +1,7 @@
+#include "skynet_malloc.h"
+
 #include <lua.h>
 #include <lauxlib.h>
-#include "luacompat52.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -54,7 +55,7 @@ little_endian(uint32_t v) {
 typedef void * document;
 
 static inline uint32_t
-get_length(const document buffer) {
+get_length(document buffer) {
 	union {
 		uint32_t v;
 		uint8_t b[4];
@@ -66,7 +67,7 @@ get_length(const document buffer) {
 static inline void
 buffer_destroy(struct buffer *b) {
 	if (b->ptr != b->buffer) {
-		free(b->ptr);
+		skynet_free(b->ptr);
 	}
 }
 
@@ -86,10 +87,10 @@ buffer_reserve(struct buffer *b, int sz) {
 	} while (b->cap <= b->size + sz);
 
 	if (b->ptr == b->buffer) {
-		b->ptr = malloc(b->cap);
+		b->ptr = skynet_malloc(b->cap);
 		memcpy(b->ptr, b->buffer, b->size);
 	} else {
-		b->ptr = realloc(b->ptr, b->cap);
+		b->ptr = skynet_realloc(b->ptr, b->cap);
 	}
 }
 
@@ -242,7 +243,7 @@ op_reply(lua_State *L) {
 			lua_pushlightuserdata(L, (void *)doc);
 			lua_rawseti(L, 2, i);
 
-			int32_t doc_len = get_length((const document)doc);
+			int32_t doc_len = get_length((document)doc);
 
 			doc += doc_len;
 			sz -= doc_len;
@@ -521,24 +522,6 @@ reply_length(lua_State *L) {
 	return 1;
 }
 
-static int
-copy_result(lua_State *L) {
-	if (lua_type(L,2) == LUA_TNIL)
-		return 0;
-	int n1 = lua_rawlen(L,1);
-	int n2 = lua_rawlen(L,2);
-	int i;
-	for (i=0;i<n1;i++) {
-		lua_rawgeti(L,1,i+1);
-		lua_rawseti(L,2,i+1);
-	}
-	for (i=n1;i<n2;i++) {
-		lua_pushnil(L);
-		lua_rawseti(L,2,i+1);
-	}
-	return 0;
-}
-
 int
 luaopen_mongo_driver(lua_State *L) {
 	luaL_checkversion(L);
@@ -551,7 +534,6 @@ luaopen_mongo_driver(lua_State *L) {
 		{ "update", op_update },
 		{ "insert", op_insert },
 		{ "length", reply_length },
-		{ "copy_result", copy_result },
 		{ NULL, NULL },
 	};
 

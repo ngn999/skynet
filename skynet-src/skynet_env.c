@@ -1,3 +1,4 @@
+#include "skynet.h"
 #include "skynet_env.h"
 
 #include <lua.h>
@@ -47,7 +48,7 @@ skynet_setenv(const char *key, const char *value) {
 
 void
 skynet_env_init() {
-	E = malloc(sizeof(*E));
+	E = skynet_malloc(sizeof(*E));
 	E->lock = 0;
 	E->L = luaL_newstate();
 }

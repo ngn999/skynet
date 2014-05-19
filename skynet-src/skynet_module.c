@@ -1,3 +1,5 @@
+#include "skynet.h"
+
 #include "skynet_module.h"
 
 #include <assert.h>
@@ -104,7 +106,7 @@ skynet_module_query(const char * name) {
 			M->m[index].module = dl;
 
 			if (_open_sym(&M->m[index]) == 0) {
-				M->m[index].name = strdup(name);
+				M->m[index].name = skynet_strdup(name);
 				M->count ++;
 				result = &M->m[index];
 			}
@@ -151,9 +153,9 @@ skynet_module_instance_release(struct skynet_module *m, void *inst) {
 
 void 
 skynet_module_init(const char *path) {
-	struct modules *m = malloc(sizeof(*m));
+	struct modules *m = skynet_malloc(sizeof(*m));
 	m->count = 0;
-	m->path = strdup(path);
+	m->path = skynet_strdup(path);
 	m->lock = 0;
 
 	M = m;

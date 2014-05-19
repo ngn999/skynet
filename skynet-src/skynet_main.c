@@ -1,6 +1,8 @@
+#include "skynet.h"
+
 #include "skynet_imp.h"
 #include "skynet_env.h"
-#include "luacompat52.h"
+#include "skynet_server.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,13 +88,14 @@ main(int argc, char *argv[]) {
 	if (argc > 1) {
 		config_file = argv[1];
 	}
+	skynet_globalinit();
 	skynet_env_init();
 
 	sigign();
 
 	struct skynet_config config;
 
-	struct lua_State *L = luaL_newstate();
+	struct lua_State *L = lua_newstate(skynet_lalloc, NULL);
 	luaL_openlibs(L);	// link lua lib
 	lua_close(L);
 
@@ -106,24 +109,19 @@ main(int argc, char *argv[]) {
 	} 
 	_init_env(L);
 
-	const char *path = optstring("lua_path","./lualib/?.lua;./lualib/?/init.lua");
-	setenv("LUA_PATH",path,1);
-	const char *cpath = optstring("lua_cpath","./luaclib/?.so");
-	setenv("LUA_CPATH",cpath,1);
-	optstring("luaservice","./service/?.lua");
+#ifdef LUA_CACHELIB
+  printf("Skynet lua code cache enable\n");
+#endif
 
 	config.thread =  optint("thread",8);
-	config.module_path = optstring("cpath","./service/?.so");
-	config.logger = optstring("logger",NULL);
+	config.module_path = optstring("cpath","./cservice/?.so");
 	config.harbor = optint("harbor", 1);
-	config.master = optstring("master","127.0.0.1:2012");
-	config.start = optstring("start","main.lua");
-	config.local = optstring("address","127.0.0.1:2525");
-	config.standalone = optstring("standalone",NULL);
+	config.bootstrap = optstring("bootstrap","snlua bootstrap");
 
 	lua_close(L);
 
 	skynet_start(&config);
+	skynet_globalexit();
 
 	printf("skynet exit\n");
 

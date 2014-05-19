@@ -2,7 +2,8 @@
   https://github.com/cloudwu/lua-serialize
  */
 
-#include "luacompat52.h"
+#include "skynet_malloc.h"
+
 #include <lua.h>
 #include <lauxlib.h>
 #include <stdlib.h>
@@ -48,7 +49,7 @@ struct read_block {
 
 inline static struct block *
 blk_alloc(void) {
-	struct block *b = malloc(sizeof(struct block));
+	struct block *b = skynet_malloc(sizeof(struct block));
 	b->next = NULL;
 	return b;
 }
@@ -111,7 +112,7 @@ wb_free(struct write_block *wb) {
 	struct block *blk = wb->head;
 	while (blk) {
 		struct block * next = blk->next;
-		free(blk);
+		skynet_free(blk);
 		blk = next;
 	}
 	wb->head = NULL;
@@ -143,7 +144,7 @@ rb_read(struct read_block *rb, void *buffer, int sz) {
 
 	if (rb->ptr == BLOCK_SIZE) {
 		struct block * next = rb->current->next;
-		free(rb->current);
+		skynet_free(rb->current);
 		rb->current = next;
 		rb->ptr = 0;
 	}
@@ -166,7 +167,7 @@ rb_read(struct read_block *rb, void *buffer, int sz) {
 
 	for (;;) {
 		struct block * next = rb->current->next;
-		free(rb->current);
+		skynet_free(rb->current);
 		rb->current = next;
 
 		if (sz < BLOCK_SIZE) {
@@ -186,7 +187,7 @@ static void
 rb_close(struct read_block *rb) {
 	while (rb->current) {
 		struct block * next = rb->current->next;
-		free(rb->current);
+		skynet_free(rb->current);
 		rb->current = next;
 	}
 	rb->len = 0;
@@ -547,7 +548,7 @@ _seri(lua_State *L, struct block *b) {
 	memcpy(&len, b->buffer ,sizeof(len));
 
 	len -= 4;
-	uint8_t * buffer = malloc(len);
+	uint8_t * buffer = skynet_malloc(len);
 	uint8_t * ptr = buffer;
 	int sz = len;
 	if (len < BLOCK_SIZE - 4) {
@@ -620,7 +621,7 @@ _luaseri_pack(lua_State *L) {
 
 	while (b) {
 		struct block * next = b->next;
-		free(b);
+		skynet_free(b);
 		b = next;
 	}
 

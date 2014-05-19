@@ -1,11 +1,7 @@
 local skynet = require "skynet"
 local socket = require "socket"
-local config = require "config"
-local redis_conf = skynet.getenv "redis"
-local name = config (redis_conf)
+local socketchannel = require "socketchannel"
 
-local readline = socket.readline
-local readbytes = socket.read
 local table = table
 local string = string
 
@@ -13,27 +9,88 @@ local redis = {}
 local command = {}
 local meta = {
 	__index = command,
-	__gc = function(self)
-		socket.close(self.__handle)
-	end,
+	-- DO NOT close channel in __gc
 }
 
-function redis.connect(dbname)
-	local db_conf   =   name[dbname]
-	local fd = assert(socket.open(db_conf.host, db_conf.port or 6379))
-	local r = setmetatable( { __handle = fd, __mode = false }, meta )
-	if db_conf.auth ~= nil then
-		r:auth(db_conf.auth)
-	end
-	if db_conf.db ~= nil then
-		r:select(db_conf.db)
-	end
+---------- redis response
+local redcmd = {}
 
-	return r
+redcmd[36] = function(fd, data) -- '$'
+	local bytes = tonumber(data)
+	if bytes < 0 then
+		return true,nil
+	end
+	local firstline = fd:read(bytes+2)
+	return true,string.sub(firstline,1,-3)
+end
+
+redcmd[43] = function(fd, data) -- '+'
+	return true,data
+end
+
+redcmd[45] = function(fd, data) -- '-'
+	return false,data
+end
+
+redcmd[58] = function(fd, data) -- ':'
+	-- todo: return string later
+	return true, tonumber(data)
+end
+
+local function read_response(fd)
+	local result = fd:readline "\r\n"
+	local firstchar = string.byte(result)
+	local data = string.sub(result,2)
+	return redcmd[firstchar](fd,data)
+end
+
+redcmd[42] = function(fd, data)	-- '*'
+	local n = tonumber(data)
+	if n < 0 then
+		return true, nil
+	end
+	local bulk = {}
+	local noerr = true
+	for i = 1,n do
+		local ok, v = read_response(fd)
+		if ok then
+			bulk[i] = v
+		else
+			noerr = false
+		end
+	end
+	return noerr, bulk
+end
+
+-------------------
+
+local function redis_login(auth, db)
+	if auth == nil and db == nil then
+		return
+	end
+	return function(so)
+		if auth then
+			so:request("AUTH "..auth.."\r\n", read_response)
+		end
+		if db then
+			so:request("SELECT "..db.."\r\n", read_response)
+		end
+	end
+end
+
+function redis.connect(db_conf)
+	local channel = socketchannel.channel {
+		host = db_conf.host,
+		port = db_conf.port or 6379,
+		auth = redis_login(db_conf.auth, db_conf.db),
+	}
+	-- try connect first only once
+	channel:connect(true)
+	return setmetatable( { channel }, meta )
 end
 
 function command:disconnect()
-	socket.close(self.__handle)
+	self[1]:close()
 	setmetatable(self, nil)
 end
 
@@ -58,202 +115,112 @@ local function compose_message(msg)
 	return cmd
 end
 
-local redcmd = {}
-
-redcmd[42] = function(fd, data)	-- '*'
-	local n = tonumber(data)
-	if n < 0 then
-		return true, nil
-	end
-	local bulk = {}
-	for i = 1,n do
-		local line = readline(fd,"\r\n")
-		local bytes = tonumber(string.sub(line,2))
-		if bytes >= 0 then
-			local data = readbytes(fd, bytes + 2)
-			-- bulk[i] = nil when bytes < 0
-			bulk[i] = string.sub(data,1,-3)
-		end
-	end
-	return true, bulk
-end
-
-redcmd[36] = function(fd, data) -- '$'
-	local bytes = tonumber(data)
-	if bytes < 0 then
-		return true,nil
-	end
-	local firstline = readbytes(fd, bytes+2)
-	return true,string.sub(firstline,1,-3)
-end
-
-redcmd[43] = function(fd, data) -- '+'
-	return true,data
-end
-
-redcmd[45] = function(fd, data) -- '-'
-	return false,data
-end
-
-redcmd[58] = function(fd, data) -- ':'
-	-- todo: return string later
-	return true, tonumber(data)
-end
-
-local function read_response(fd)
-	local result = readline(fd, "\r\n")
-	local firstchar = string.byte(result)
-	local data = string.sub(result,2)
-	return redcmd[firstchar](fd,data)
-end
-
 setmetatable(command, { __index = function(t,k)
 	local cmd = string.upper(k)
 	local f = function (self, ...)
-		local fd = self.__handle
-		if self.__mode then
-			socket.write(fd, compose_message { cmd, ... })
-			self.__batch = self.__batch + 1
-		else
-			socket.lock(fd)
-			socket.write(fd, compose_message { cmd, ... })
-			local ok, ret = read_response(fd)
-			socket.unlock(fd)
-			assert(ok, ret)
-			return ret
-		end
+		return self[1]:request(compose_message { cmd, ... }, read_response)
 	end
 	t[k] = f
 	return f
 end})
 
+local function read_boolean(so)
+	local ok, result = read_response(so)
+	return ok, result ~= 0
+end
+
 function command:exists(key)
-	assert(not self.__mode, "exists can't used in batch mode")
-	local fd = self.__handle
-	socket.lock(fd)
-	socket.write(fd, compose_message { "EXISTS", key })
-	local ok, exists = read_response(fd)
-	socket.unlock(fd)
-	assert(ok, exists)
-	return exists ~= 0
+	local fd = self[1]
+	return fd:request(compose_message { "EXISTS", key }, read_boolean)
 end
 
 function command:sismember(key, value)
-	assert(not self.__mode, "sismember can't used in batch mode")
-	local fd = self.__handle
-	socket.lock(fd)
-	socket.write(fd, compose_message { "SISMEMBER", key, value })
-	local ok, ismember = read_response(fd)
-	socket.unlock(fd)
-	assert(ok, ismember)
-	return ismember ~= 0
+	local fd = self[1]
+	return fd:request(compose_message { "SISMEMBER", key, value }, read_boolean)
 end
 
-function command:batch(mode)
-	if mode == "end" then
-		local fd = self.__handle
-		if self.__mode == "read" then
-			local allok = true
-			local allret = {}
-			for i = 1, self.__batch do
-				local ok, ret = read_response(fd)
-				allok = allok and ok
-				allret[i] = ret
-			end
-			self.__mode = false
-			socket.unlock(self.__handle)
-			assert(allok, "batch read failed")
-			return allret
-		else
-			local allok = true
-			for i = 1, self.__batch do
-				local ok = read_response(fd)
-				allok = allok and ok
-			end
-			self.__mode = false
-			socket.unlock(self.__handle)
-			return allok
+--- watch mode
+
+local watch = {}
+
+local watchmeta = {
+	__index = watch,
+	__gc = function(self)
+		self.__sock:close()
+	end,
+}
+
+local function watch_login(obj, auth)
+	return function(so)
+		if auth then
+			so:request("AUTH "..auth.."\r\n", read_response)
 		end
-	else
-		assert(mode == "read" or mode == "write")
-		socket.lock(self.__handle)
-		self.__mode = mode
-		self.__batch = 0
-	end
-end
-
-function command:multi()
-	local fd = self.__handle
-	socket.lock(fd)
-	self.__mode = "multi"
-	self.__batch = 0
-	socket.write(fd, "MULTI\r\n")
-end
-
-local function read_exec(fd)
-	local result = readline(fd, "\r\n")
-	local firstchar = string.byte(result)
-	local data = string.sub(result,2)
-	if firstchar ~= 42 then
-		return false, data
-	end
-
-	local n = tonumber(data)
-	local result = {}
-	local err = nil
-	for i = 1,n do
-		local ok, r = read_response(fd)
-		result[i] = r
-		if err then
-			err[i] = ok
-		else
-			if ok == false then
-				err = {}
-				for j = 1, i-1 do
-					err[j] = true
-				end
-				err[i] = false
-			end
+		for k in pairs(obj.__psubscribe) do
+			so:request(compose_message { "PSUBSCRIBE", k })
+		end
+		for k in pairs(obj.__subscribe) do
+			so:request(compose_message { "SUBSCRIBE", k })
 		end
 	end
-	return result, err
 end
 
-function command:exec()
-	if self.__mode ~= "multi" then
-		error "call multi first"
-	end
-	local fd = self.__handle
-	socket.write(fd, "EXEC\r\n")
-	local allok = true
-	for i = 0, self.__batch do
-		local ok, queue = read_response(fd)
-		allok = allok and ok
-	end
-	if not allok then
-		self.__mode = false
-		socket.unlock(fd)
-		error "Queue command error"
-	end
+function redis.watch(db_conf)
+	local obj = {
+		__subscribe = {},
+		__psubscribe = {},
+	}
+	local channel = socketchannel.channel {
+		host = db_conf.host,
+		port = db_conf.port or 6379,
+		auth = watch_login(obj, db_conf.auth),
+	}
+	obj.__sock = channel
 
-	local result, err = read_exec(fd)
+	-- try connect first only once
+	channel:connect(true)
+	return setmetatable( obj, watchmeta )
+end
 
-	self.__mode = false
-	socket.unlock(fd)
+function watch:disconnect()
+	self.__sock:close()
+	setmetatable(self, nil)
+end
 
-	if not result then
-		error(err)
-	elseif err then
-		local errmsg = ""
-		for k,v in ipairs(err) do
-			if v == false then
-				errmsg = errmsg .. k .. ":" .. result[k]
-			end
+local function watch_func( name )
+	local NAME = string.upper(name)
+	watch[name] = function(self, ...)
+		local so = self.__sock
+		for i = 1, select("#", ...) do
+			local v = select(i, ...)
+			so:request(compose_message { NAME, v })
 		end
-		error(errmsg)
 	end
+end
 
-	return result
+watch_func "subscribe"
+watch_func "psubscribe"
+watch_func "unsubscribe"
+watch_func "punsubscribe"
+
+function watch:message()
+	local so = self.__sock
+	while true do
+		local ret = so:response(read_response)
+		local type , channel, data , data2 = ret[1], ret[2], ret[3], ret[4]
+		if type == "message" then
+			return data, channel
+		elseif type == "pmessage" then
+			return data2, data, channel
+		elseif type == "subscribe" then
+			self.__subscribe[channel] = true
+		elseif type == "psubscribe" then
+			self.__psubscribe[channel] = true
+		elseif type == "unsubscribe" then
+			self.__subscribe[channel] = nil
+		elseif type == "punsubscribe" then
+			self.__psubscribe[channel] = nil
+		end
+	end
 end
 
 return redis

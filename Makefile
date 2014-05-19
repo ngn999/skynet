@@ -1,109 +1,115 @@
-.PHONY : all clean 
+include platform.mk
 
-CFLAGS = -g -Wall 
-LDFLAGS = -lpthread -llua -lm
+LUA_CLIB_PATH ?= luaclib
+CSERVICE_PATH ?= cservice
 
-uname_S := $(shell sh -c 'uname -s 2>/dev/null || echo not')
-ifeq ($(uname_S), Darwin)
-	SHARED = -fPIC -dynamiclib -Wl,-undefined,dynamic_lookup
-else
-	LDFLAGS += -lrt -Wl,-E
-	SHARED = -fPIC --shared
-endif
+SKYNET_BUILD_PATH ?= .
 
-ifneq ($(uname_S), FreeBSD)
-	LDFLAGS += -ldl
-endif
+CFLAGS = -g -O2 -Wall -I$(LUA_INC) $(MYCFLAGS) 
+
+# lua
+
+LUA_STATICLIB := 3rd/lua/liblua.a
+LUA_LIB ?= $(LUA_STATICLIB)
+LUA_INC ?= 3rd/lua
+
+$(LUA_STATICLIB) :
+	cd 3rd/lua && $(MAKE) CC=$(CC) $(PLAT)
+
+# jemalloc 
+
+JEMALLOC_STATICLIB := 3rd/jemalloc/lib/libjemalloc_pic.a
+JEMALLOC_INC := 3rd/jemalloc/include/jemalloc
+
+all : jemalloc
+	
+.PHONY : jemalloc
+
+MALLOC_STATICLIB := $(JEMALLOC_STATICLIB)
+
+$(JEMALLOC_STATICLIB) : 3rd/jemalloc/Makefile
+	cd 3rd/jemalloc && $(MAKE) CC=$(CC) 
+
+3rd/jemalloc/autogen.sh :
+	git submodule update --init
+
+3rd/jemalloc/Makefile : | 3rd/jemalloc/autogen.sh
+	cd 3rd/jemalloc && ./autogen.sh --with-jemalloc-prefix=je_ --disable-valgrind
+
+jemalloc : $(MALLOC_STATICLIB)
+
+# skynet
+
+CSERVICE = snlua logger gate master harbor
+LUA_CLIB = skynet socketdriver int64 bson mongo md5 netpack cjson clientsocket memory profile multicast
+
+SKYNET_SRC = skynet_main.c skynet_handle.c skynet_module.c skynet_mq.c \
+  skynet_server.c skynet_start.c skynet_timer.c skynet_error.c \
+  skynet_harbor.c skynet_env.c skynet_monitor.c skynet_socket.c socket_server.c \
+  malloc_hook.c
 
 all : \
-  skynet \
-  service/snlua.so \
-  service/logger.so \
-  service/gate.so \
-  service/client.so \
-  service/master.so \
-  service/multicast.so \
-  service/tunnel.so \
-  service/harbor.so \
-  service/localcast.so \
-  luaclib/skynet.so \
-  luaclib/socketdriver.so \
-  luaclib/int64.so \
-  luaclib/mcast.so \
-  luaclib/bson.so \
-  luaclib/mongo.so \
-  client
+  $(SKYNET_BUILD_PATH)/skynet \
+  $(foreach v, $(CSERVICE), $(CSERVICE_PATH)/$(v).so) \
+  $(foreach v, $(LUA_CLIB), $(LUA_CLIB_PATH)/$(v).so) 
 
-skynet : \
-  skynet-src/skynet_main.c \
-  skynet-src/skynet_handle.c \
-  skynet-src/skynet_module.c \
-  skynet-src/skynet_mq.c \
-  skynet-src/skynet_server.c \
-  skynet-src/skynet_start.c \
-  skynet-src/skynet_timer.c \
-  skynet-src/skynet_error.c \
-  skynet-src/skynet_harbor.c \
-  skynet-src/skynet_multicast.c \
-  skynet-src/skynet_group.c \
-  skynet-src/skynet_env.c \
-  skynet-src/skynet_monitor.c \
-  skynet-src/skynet_socket.c \
-  skynet-src/socket_server.c \
-  luacompat/compat52.c
-	gcc $(CFLAGS) -Iluacompat -o $@ $^ -Iskynet-src $(LDFLAGS)
+$(SKYNET_BUILD_PATH)/skynet : $(foreach v, $(SKYNET_SRC), skynet-src/$(v)) $(LUA_LIB) $(MALLOC_STATICLIB)
+	$(CC) $(CFLAGS) -o $@ $^ -Iskynet-src -I$(JEMALLOC_INC) $(LDFLAGS) $(EXPORT) $(SKYNET_LIBS) $(SKYNET_DEFINES)
 
-luaclib:
-	mkdir luaclib
+$(LUA_CLIB_PATH) :
+	mkdir $(LUA_CLIB_PATH)
 
-service/tunnel.so : service-src/service_tunnel.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+$(CSERVICE_PATH) :
+	mkdir $(CSERVICE_PATH)
 
-service/multicast.so : service-src/service_multicast.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+define CSERVICE_TEMP
+  $$(CSERVICE_PATH)/$(1).so : service-src/service_$(1).c | $$(CSERVICE_PATH)
+	$(CC) $$(CFLAGS) $$(SHARED) $$< -o $$@ -Iskynet-src
+endef
 
-service/master.so : service-src/service_master.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+$(foreach v, $(CSERVICE), $(eval $(call CSERVICE_TEMP,$(v))))
 
-service/harbor.so : service-src/service_harbor.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+$(LUA_CLIB_PATH)/skynet.so : lualib-src/lua-skynet.c lualib-src/lua-seri.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src -Iservice-src -Ilualib-src
 
-service/logger.so : skynet-src/skynet_logger.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+$(LUA_CLIB_PATH)/socketdriver.so : lualib-src/lua-socket.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src -Iservice-src
 
-service/snlua.so : service-src/service_lua.c service-src/luacode_cache.c service-src/luaalloc.c
-	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ -Iskynet-src
+$(LUA_CLIB_PATH)/int64.so : 3rd/lua-int64/int64.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ 
 
-service/gate.so : service-src/service_gate.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+$(LUA_CLIB_PATH)/bson.so : lualib-src/lua-bson.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
 
-service/localcast.so : service-src/service_localcast.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+$(LUA_CLIB_PATH)/mongo.so : lualib-src/lua-mongo.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
 
-luaclib/skynet.so : lualib-src/lua-skynet.c lualib-src/lua-seri.c lualib-src/trace_service.c lualib-src/timingqueue.c | luaclib
-	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ -Iskynet-src -Iservice-src -Ilualib-src
+$(LUA_CLIB_PATH)/md5.so : 3rd/lua-md5/md5.c 3rd/lua-md5/md5lib.c 3rd/lua-md5/compat-5.2.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) -I3rd/lua-md5 $^ -o $@ 
 
-service/client.so : service-src/service_client.c
-	gcc $(CFLAGS) $(SHARED) $^ -o $@ -Iskynet-src
+$(LUA_CLIB_PATH)/netpack.so : lualib-src/lua-netpack.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) $^ -Iskynet-src -o $@ 
 
-luaclib/socketdriver.so : lualib-src/lua-socket.c | luaclib
-	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ -Iskynet-src -Iservice-src
+$(LUA_CLIB_PATH)/cjson.so : | $(LUA_CLIB_PATH)
+	cd 3rd/lua-cjson && $(MAKE) LUA_INCLUDE_DIR=../../$(LUA_INC) CC=$(CC) CJSON_LDFLAGS="$(SHARED)" && cd ../.. && cp 3rd/lua-cjson/cjson.so $@
 
-luaclib/int64.so : lua-int64/int64.c | luaclib
-	gcc $(CFLAGS) $(SHARED) -Iluacompat -O2 $^ -o $@ 
+$(LUA_CLIB_PATH)/clientsocket.so : lualib-src/lua-clientsocket.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ -lpthread
 
-luaclib/mcast.so : lualib-src/lua-localcast.c | luaclib
-	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ -Iskynet-src -Iservice-src
+$(LUA_CLIB_PATH)/memory.so : lualib-src/lua-memory.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) -Iskynet-src $^ -o $@ 
 
-luaclib/bson.so : lualib-src/lua-bson.c | luaclib
-	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ 
+$(LUA_CLIB_PATH)/profile.so : lualib-src/lua-profile.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) $^ -o $@ 
 
-luaclib/mongo.so : lualib-src/lua-mongo.c | luaclib
-	gcc $(CFLAGS) $(SHARED) -Iluacompat $^ -o $@ 
-
-client : client-src/client.c
-	gcc $(CFLAGS) $^ -o $@ -lpthread
+$(LUA_CLIB_PATH)/multicast.so : lualib-src/lua-multicast.c | $(LUA_CLIB_PATH)
+	$(CC) $(CFLAGS) $(SHARED) -Iskynet-src $^ -o $@ 
 
 clean :
-	rm skynet client service/*.so luaclib/*.so
-	
+	rm -f $(SKYNET_BUILD_PATH)/skynet $(CSERVICE_PATH)/*.so $(LUA_CLIB_PATH)/*.so
+
+cleanall: clean
+	cd 3rd/lua-cjson && $(MAKE) clean
+	cd 3rd/jemalloc && $(MAKE) clean
+	rm -f $(LUA_STATICLIB)
+

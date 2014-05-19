@@ -29,19 +29,19 @@ skynet_error(struct skynet_context * context, const char *msg, ...) {
 	int len = vsnprintf(tmp, LOG_MESSAGE_SIZE, msg, ap);
 	va_end(ap);
 	if (len < LOG_MESSAGE_SIZE) {
-		data = strdup(tmp);
+		data = skynet_strdup(tmp);
 	} else {
 		int max_size = LOG_MESSAGE_SIZE;
 		for (;;) {
 			max_size *= 2;
-			data = malloc(max_size);
+			data = skynet_malloc(max_size);
 			va_start(ap,msg);
 			len = vsnprintf(data, max_size, msg, ap);
 			va_end(ap);
 			if (len < max_size) {
 				break;
 			}
-			free(data);
+			skynet_free(data);
 		}
 	}
 
